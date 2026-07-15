@@ -1,7 +1,7 @@
 {
-  "name": "artizo-vscodium",
-  "displayName": "Artizo Dev Containers for VSCodium",
-  "description": "Artizo Dev Containers for VSCodium: Develop inside Docker containers. Define your environment as code with devcontainer.json for isolated, reproducible development.",
+  "name": "jvp-artizo-vscodium",
+  "displayName": "Javampire Dev Containers for VSCodium",
+  "description": "Javampire Dev Containers for VSCodium: Develop inside Docker containers. Define your environment as code with devcontainer.json for isolated, reproducible development.",
   "keywords": [
     "vscodium",
     "codium",

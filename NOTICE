@@ -1,6 +1,14 @@
 Artizo Dev Containers
 Copyright 2026 Aergic Labs, LLC
 
+This is a modified version (Javampire fork) of the upstream Artizo Dev
+Containers extension. Modifications are licensed under the same AGPL-3.0-only
+license as the original work.
+
+Javampire fork modifications:
+  - Rebrand to Javampire (brand strings, extension IDs, VSIX names)
+  - Fix extension directory collision (built-in vs. user extensions)
+
 Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
 This product includes software developed by third parties.

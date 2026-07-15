@@ -174,7 +174,8 @@ export class ConfigEditService {
         (e) =>
           !e.id.startsWith("vscode.") &&
           !e.extensionPath.startsWith(vscode.env.appRoot) &&
-          !/^aergic\.(artizo|zygos)-/.test(e.id),
+          !/^aergic\.(artizo|zygos)-/.test(e.id) &&
+          !/^javampire\./.test(e.id),
       )
       .map((e) => ({
         id: e.id,

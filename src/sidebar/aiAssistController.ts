@@ -112,7 +112,8 @@ export class AiAssistController {
         (e) =>
           !e.id.startsWith("vscode.") &&
           !e.extensionPath.startsWith(vscode.env.appRoot) &&
-          !/^aergic\.artizo-/.test(e.id),
+          !/^aergic\.artizo-/.test(e.id) &&
+          !/^javampire\./.test(e.id),
       )
       .map((e) => e.id)
       .join(", ");

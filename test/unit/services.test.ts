@@ -464,13 +464,13 @@ describe("services", () => {
   describe("getArgvExtensionId", () => {
     it("returns the vscodium extension ID when all adapter flags are false", () => {
       // test/setup.ts sets all HAS_*_ADAPTER flags to false
-      expect(getArgvExtensionId()).toBe("aergic.artizo-vscodium");
+      expect(getArgvExtensionId()).toBe("javampire.artizo-vscodium");
     });
 
     it("returns the Kiro extension ID when HAS_KIRO_ADAPTER is set", () => {
       (globalThis as any).HAS_KIRO_ADAPTER = true;
       try {
-        expect(getArgvExtensionId()).toBe("aergic.artizo-kiro");
+        expect(getArgvExtensionId()).toBe("javampire.artizo-kiro");
       } finally {
         (globalThis as any).HAS_KIRO_ADAPTER = false;
       }

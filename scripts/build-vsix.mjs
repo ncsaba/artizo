@@ -88,11 +88,11 @@ const basePkg = JSON.parse(fs.readFileSync(basePkgPath, "utf-8"));
 const version = basePkg.version;
 
 // Remove any old VSIX for this target
-const outFile = `artizo-${target}-${version}.vsix`;
+const outFile = `jvp-${target}-${version}.vsix`;
 const outPath = path.join(root, outFile);
 for (const f of fs.readdirSync(root)) {
   if (
-    f.startsWith(`artizo-${target}-`) &&
+    f.startsWith(`jvp-${target}-`) &&
     f.endsWith(".vsix") &&
     f !== outFile
   ) {

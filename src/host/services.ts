@@ -72,12 +72,12 @@ export function readSettings(): ExtensionSettings {
 /** Resolve the extension ID for argv.json from build-time adapter flags. */
 export function getArgvExtensionId(): string {
   return HAS_KIRO_ADAPTER
-    ? "aergic.artizo-kiro"
+    ? "javampire.artizo-kiro"
     : HAS_TRAE_ADAPTER
-      ? "aergic.artizo-trae"
+      ? "javampire.artizo-trae"
       : HAS_DEVIN_ADAPTER
-        ? "aergic.artizo-devin"
-        : "aergic.artizo-vscodium";
+        ? "javampire.artizo-devin"
+        : "javampire.artizo-vscodium";
 }
 
 async function ensureArgvProposedApi(

@@ -3,7 +3,7 @@
   "displayName": "Artizo Dev Containers",
   "description": "Develop inside Docker containers. Define your environment as code with devcontainer.json for isolated, reproducible development.",
   "version": "0.6.2",
-  "publisher": "aergic",
+  "publisher": "javampire",
   "productName": "Artizo",
   "license": "AGPL-3.0-only",
   "homepage": "https://github.com/aergic-labs/artizo",
