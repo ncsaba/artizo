@@ -162,16 +162,18 @@ export class ServerManager implements IServerManager {
   }
 
   /**
-   * Container-side extensions directory.
+   * Container-side extensions directory for user-installed extensions.
    *
-   * `${installRoot}/${serverDataFolderName}/extensions` - matches
-   * the `.<name>-server/extensions` convention used by each platform's
-   * remote extension host.
+   * Uses `${installRoot}/${serverDataFolderName}/data/extensions` to avoid
+   * collision with the server's built-in extensions at
+   * `${installRoot}/${serverDataFolderName}/extensions`. When both share the
+   * same path, user-installed extensions are reclassified as "built-in" on
+   * window reload.
    */
   getExtensionsDir(containerId: string): Promise<string> {
     return this.getServerInstallRoot(containerId).then(
       (installRoot) =>
-        `${installRoot}/${this.productInfo.serverDataFolderName}/extensions`,
+        `${installRoot}/${this.productInfo.serverDataFolderName}/data/extensions`,
     );
   }
 

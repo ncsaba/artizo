@@ -108,7 +108,9 @@ describe("VSCodiumAdapter", () => {
     it("returns vscodium-server and vscode-oss-server candidates", () => {
       const adapter = new VSCodiumAdapter(BASE_CONFIG);
       expect(adapter.getRemoteExtensionsDirCandidates()).toEqual([
+        ".vscodium-server/data/extensions",
         ".vscodium-server/extensions",
+        ".vscode-oss-server/data/extensions",
         ".vscode-oss-server/extensions",
       ]);
     });

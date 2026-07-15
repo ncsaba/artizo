@@ -81,7 +81,15 @@ export class VSCodiumAdapter implements IPlatformAdapter {
     // server folder uses the "vscodium-server" name, not derivable
     // from dataFolderName. Also probe .vscode-oss-server as a
     // secondary candidate for code-oss users.
-    return [".vscodium-server/extensions", ".vscode-oss-server/extensions"];
+    //
+    // The data/extensions variant is used by the Javampire fork to avoid
+    // the built-in/user extension directory collision.
+    return [
+      ".vscodium-server/data/extensions",
+      ".vscodium-server/extensions",
+      ".vscode-oss-server/data/extensions",
+      ".vscode-oss-server/extensions",
+    ];
   }
 
   getApexExtensionsDir(): string {

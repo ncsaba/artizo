@@ -254,7 +254,7 @@ describe("serverManager", () => {
       it("returns extensions path under the server data folder", async () => {
         const dir = await manager.getExtensionsDir("container1");
         expect(dir).toBe(
-          `/tmp/${TEST_PRODUCT_INFO.serverDataFolderName}/extensions`,
+          `/tmp/${TEST_PRODUCT_INFO.serverDataFolderName}/data/extensions`,
         );
       });
     });

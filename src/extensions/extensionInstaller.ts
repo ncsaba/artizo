@@ -126,9 +126,9 @@ export class ExtensionInstaller {
     const adapter = await getPlatformAdapter();
     const installRoot = adapter.getServerInstallRoot?.() ?? "/tmp";
     const candidates = adapter.getRemoteExtensionsDirCandidates();
-    // Candidates are relative to home (e.g. ".<name>-server/extensions").
+    // Candidates are relative to home (e.g. ".<name>-server/data/extensions").
     // The container install root is /tmp, so build an absolute path.
-    const rel = candidates[0] ?? `${adapter.dataFolderName}-server/extensions`;
+    const rel = candidates[0] ?? `${adapter.dataFolderName}-server/data/extensions`;
     return `${installRoot}/${rel}`;
   }
 
