@@ -4,7 +4,7 @@
  */
 
 import { execFilePromise, dockerVolumeCreate, dockerRun } from "../utils/dockerUtils";
-import { BRAND, BRAND_PREFIX } from "../utils/constants";
+import { BRAND, BRAND_PREFIX, MANAGED_LABEL } from "../utils/constants";
 import type { BuildResult, WorkflowDependencies, WorkflowUI } from "./types";
 import { launchProvision, withDefaults } from "../devcontainer/api";
 import { ProvisionFailedError } from "../devcontainer/provisionError";
@@ -63,7 +63,7 @@ export async function cloneInVolume(
           progress.report({ message: `Cloning ${repoUrl}...` });
 
           const createResult = await dockerVolumeCreate(volumeName, {
-            labels: { "com.artizo.managed": "true" },
+            labels: { [MANAGED_LABEL.split("=")[0]]: "true" },
           });
           if (createResult.exitCode !== 0) {
             throw new Error(`Failed to create volume: ${createResult.stderr}`);
