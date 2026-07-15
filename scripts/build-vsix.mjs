@@ -203,7 +203,11 @@ try {
     }
   }
 
-  // Write vendor README after copy so it replaces any root README.md that was copied
+  // Write vendor README after copy so it replaces any root README.md that was copied.
+  // Delete the uppercase version first (the copy step preserves original casing) to
+  // avoid case-insensitive collisions in the VSIX format.
+  const upperReadme = path.join(stageDir, "README.md");
+  if (fs.existsSync(upperReadme)) fs.unlinkSync(upperReadme);
   fs.writeFileSync(path.join(stageDir, "readme.md"), readme);
 
   // Write merged package.json after copy so it replaces the root one
