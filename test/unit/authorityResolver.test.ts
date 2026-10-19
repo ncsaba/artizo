@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import vscodeMock from "../__mocks__/vscode";
 
 vi.mock("vscode", () => ({ default: vscodeMock, ...vscodeMock }));
@@ -31,6 +31,19 @@ const { mockStartExecServerBridge } = vi.hoisted(() => ({
 vi.mock("../../src/remote/execServerBridge", () => ({
   startExecServerBridge: mockStartExecServerBridge,
 }));
+
+// Mock launchProvision (the heavy CLI build call) while keeping the real
+// pure helpers (withDefaults, dotfilesFromConfig) from the same module.
+const { mockLaunchProvision } = vi.hoisted(() => ({
+  mockLaunchProvision: vi.fn(),
+}));
+vi.mock("../../src/devcontainer/api", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("../../src/devcontainer/api")
+  >();
+  return { ...actual, launchProvision: mockLaunchProvision };
+});
+import * as fs from "node:fs";
 import { execFile } from "node:child_process";
 import * as vscode from "vscode";
 import {
@@ -198,6 +211,163 @@ describe("RemoteAuthorityResolver", () => {
       if (result.type === "error") {
         expect(result.message).toContain("No dev container found");
         expect(result.message).toContain(workspacePath);
+      }
+    });
+  });
+
+  describe("resolve - dev-container self-healing", () => {
+    const workspacePath = "/home/user/project";
+    const makeAuthority = () =>
+      encodeAuthority(SCHEME_DEV_CONTAINER, workspacePath);
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("finds a stopped container (ps -a), starts it, and resolves", async () => {
+      const id = "stopped123def456";
+      const psArgs: string[][] = [];
+      const startCalls: string[][] = [];
+      let inspectCalls = 0;
+      mockExecFile.mockImplementation(
+        (_cmd: any, args: any, ...rest: any[]) => {
+          const callback = typeof rest[0] === "function" ? rest[0] : rest[1];
+          const argsArray = args as string[];
+          if (argsArray[0] === "ps") {
+            psArgs.push(argsArray);
+            callback(null, `${id}\n`, "");
+          } else if (argsArray[0] === "inspect") {
+            inspectCalls += 1;
+            const stopped = inspectCalls === 1;
+            const data = makeContainerData({
+              Id: id,
+              State: stopped
+                ? { Status: "exited", Running: false, Pid: 0 }
+                : { Status: "running", Running: true, Pid: 999 },
+            });
+            callback(null, JSON.stringify(data), "");
+          } else if (argsArray[0] === "start") {
+            startCalls.push(argsArray);
+            callback(null, id, "");
+          } else {
+            callback(null, "", "");
+          }
+          return {} as any;
+        },
+      );
+
+      const result = await resolver.resolve(makeAuthority());
+
+      expect(result.type).toBe("success");
+      if (result.type === "success") {
+        expect(result.authority.host).toBe(id);
+      }
+      expect(startCalls).toHaveLength(1);
+      expect(startCalls[0]).toEqual(["start", id]);
+      // Stopped containers must be visible to the label lookup.
+      expect(psArgs.length).toBeGreaterThan(0);
+      expect(psArgs.some((a) => a.includes("-a"))).toBe(true);
+    });
+
+    it("auto-builds the container when none exists, then resolves", async () => {
+      const newId = "fresh456abc789";
+      const readFileSpy = vi
+        .spyOn(fs.promises, "readFile")
+        .mockResolvedValue(
+          JSON.stringify({ image: "node:22", remoteUser: "node" }),
+        );
+      const psArgs: string[][] = [];
+      let startCalls = 0;
+      mockExecFile.mockImplementation(
+        (_cmd: any, args: any, ...rest: any[]) => {
+          const callback = typeof rest[0] === "function" ? rest[0] : rest[1];
+          const argsArray = args as string[];
+          if (argsArray[0] === "ps") {
+            psArgs.push(argsArray);
+            callback(null, "", "");
+          } else if (argsArray[0] === "inspect") {
+            const data = makeContainerData({ Id: newId });
+            callback(null, JSON.stringify(data), "");
+          } else if (argsArray[0] === "start") {
+            startCalls += 1;
+            callback(null, newId, "");
+          } else {
+            callback(null, "", "");
+          }
+          return {} as any;
+        },
+      );
+      mockLaunchProvision.mockResolvedValue({
+        containerId: newId,
+        remoteUser: "node",
+        remoteWorkspaceFolder: workspacePath,
+        finishBackgroundTasks: vi.fn(),
+      });
+
+      const result = await resolver.resolve(makeAuthority());
+
+      expect(result.type).toBe("success");
+      if (result.type === "success") {
+        expect(result.authority.host).toBe(newId);
+      }
+      expect(readFileSpy).toHaveBeenCalledWith(
+        expect.stringContaining("/.devcontainer/devcontainer.json"),
+        "utf-8",
+      );
+      expect(mockLaunchProvision).toHaveBeenCalledTimes(1);
+      const [options, configPathArg, overrideArg, lookupLabels] =
+        mockLaunchProvision.mock.calls[0] as [
+          any,
+          string,
+          string | undefined,
+          string[] | undefined,
+        ];
+      expect(configPathArg).toContain("/.devcontainer/devcontainer.json");
+      expect(overrideArg).toBeUndefined();
+      expect(options.removeExistingContainer).toBe(false);
+      expect(lookupLabels).toContain(`artizo.local_folder=${workspacePath}`);
+      expect(lookupLabels).toContain(
+        `devcontainer.local_folder=${workspacePath}`,
+      );
+      expect(options.additionalLabels).toContain("artizo.remote_user=node");
+      // A fresh build must not go through the docker-start path.
+      expect(startCalls).toBe(0);
+      expect(psArgs.some((a) => a.includes("-a"))).toBe(true);
+    });
+
+    it("returns an error when the start attempt times out", async () => {
+      const id = "neverstart123";
+      resolver = new RemoteAuthorityResolver({
+        startPollIntervalMs: 5,
+        startTimeoutMs: 80,
+      });
+      mockExecFile.mockImplementation(
+        (_cmd: any, args: any, ...rest: any[]) => {
+          const callback = typeof rest[0] === "function" ? rest[0] : rest[1];
+          const argsArray = args as string[];
+          if (argsArray[0] === "ps") {
+            callback(null, `${id}\n`, "");
+          } else if (argsArray[0] === "inspect") {
+            const data = makeContainerData({
+              Id: id,
+              State: { Status: "exited", Running: false, Pid: 0 },
+            });
+            callback(null, JSON.stringify(data), "");
+          } else if (argsArray[0] === "start") {
+            callback(null, id, "");
+          } else {
+            callback(null, "", "");
+          }
+          return {} as any;
+        },
+      );
+
+      const result = await resolver.resolve(makeAuthority());
+
+      expect(result.type).toBe("error");
+      if (result.type === "error") {
+        expect(result.message).toContain("did not start");
+        expect(result.message).toContain(id);
       }
     });
   });

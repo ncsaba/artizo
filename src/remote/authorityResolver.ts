@@ -65,6 +65,10 @@ function logToFile(msg: string): void {
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Connection details for a resolved container authority. */
 export interface ResolvedAuthority {
   host: string;
@@ -97,6 +101,10 @@ export interface AuthorityResolverOptions {
   serverManager?: IServerManager;
   /** Extension install path - used to locate the askpass scripts. */
   extensionPath?: string;
+  /** Poll interval (ms) while waiting for a started container to run. */
+  startPollIntervalMs?: number;
+  /** Max time (ms) to wait for a started container to reach running. */
+  startTimeoutMs?: number;
 }
 
 /**
@@ -116,6 +124,9 @@ export class RemoteAuthorityResolver {
   private readonly forwardConnections: Set<{ socket: net.Socket; child: import("node:child_process").ChildProcess }> = new Set();
   /** Extension install path (for locating bundled askpass scripts). */
   private readonly extensionPath: string | undefined;
+  /** Poll interval + timeout for waiting on a freshly started container. */
+  private readonly startPollIntervalMs: number;
+  private readonly startTimeoutMs: number;
   /**
    * Active SSH tunnels keyed by the local port returned to VS Code. Allows
    * `dispose()` to tear down tunnels (and stop respawn) on extension
@@ -127,6 +138,8 @@ export class RemoteAuthorityResolver {
     this.dockerPath = options?.dockerPath ?? "docker";
     this.serverManager = options?.serverManager;
     this.extensionPath = options?.extensionPath;
+    this.startPollIntervalMs = options?.startPollIntervalMs ?? 250;
+    this.startTimeoutMs = options?.startTimeoutMs ?? 30_000;
     logToFile("=== RemoteAuthorityResolver created ===");
   }
 
@@ -207,20 +220,184 @@ export class RemoteAuthorityResolver {
 
   /**
    * Resolve a dev-container authority by workspace path.
-   * Finds the container via Docker labels matching the workspace folder.
+   *
+   * Self-healing: if no container matches the workspace labels, auto-build
+   * one from `<workspacePath>/.devcontainer/devcontainer.json`; if a
+   * container exists but is stopped, start it and wait for it to run —
+   * then resolve as usual.
    */
   private async resolveDevContainer(
     workspacePath: string,
   ): Promise<ResolveResult> {
-    const containerId = await this.findContainerByLabel(workspacePath);
+    let containerId = await this.findContainerByLabel(workspacePath);
+
     if (!containerId) {
-      return {
-        type: "error",
-        message: `No dev container found for workspace: "${workspacePath}"`,
-      };
+      logToFile(
+        `[Resolver] No container for workspace "${workspacePath}"; attempting auto-build`,
+      );
+      const built = await this.autoBuildContainer(workspacePath);
+      if (typeof built !== "string") {
+        return built;
+      }
+      containerId = built;
+    }
+
+    // Reopening a recent window must not fail just because the container
+    // is stopped: start it and wait for it to run before resolving. Also
+    // covers a freshly built container that is not running yet.
+    const startError = await this.ensureContainerRunning(containerId);
+    if (startError) {
+      return startError;
     }
 
     return this.resolveContainerById(containerId, { checkConfig: true });
+  }
+
+  /**
+   * Build a dev container for a workspace that has no container yet.
+   * The resolver runs host-side, so the devcontainer.json is read with
+   * plain fs. Returns the new container ID, or an error result carrying
+   * the provision description.
+   */
+  private async autoBuildContainer(
+    workspacePath: string,
+  ): Promise<string | ResolveResult> {
+    const configPath = path.join(
+      workspacePath,
+      ".devcontainer",
+      "devcontainer.json",
+    );
+    let config: Record<string, unknown> | undefined;
+    try {
+      const contents = await fs.promises.readFile(configPath, "utf-8");
+      config = JSON.parse(contents) as Record<string, unknown>;
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logToFile(`[Resolver] Auto-build: cannot read ${configPath}: ${message}`);
+      return {
+        type: "error",
+        message: `No dev container found for workspace: "${workspacePath}" and auto-build failed: cannot read ${configPath} (${message})`,
+      };
+    }
+
+    logToFile(`[Resolver] Auto-build: building container for "${workspacePath}"`);
+    try {
+      const adapter = await getPlatformAdapter();
+      const platformTarget = adapter.name.toLowerCase();
+      const labelParams = {
+        platformTarget,
+        workspaceFolder: workspacePath,
+        configPath,
+        config,
+      };
+      // Stable labels are the idLabels for find-existing lookups; the
+      // identity labels (config hash, remote user) travel as annotations.
+      const lookupLabels = await buildLookupLabels(labelParams);
+      const idLabels = await buildIdentityLabels(labelParams);
+
+      const options = withDefaults({
+        workspaceFolder: workspacePath,
+        additionalLabels: idLabels,
+        configFile: URI.file(configPath),
+        removeExistingContainer: false,
+        log: (text: string) => logToFile(`[Resolver] [auto-build] ${text}`),
+      });
+
+      const result = await launchProvision(
+        options,
+        configPath,
+        undefined,
+        lookupLabels,
+      );
+      if (result?.finishBackgroundTasks) {
+        await result.finishBackgroundTasks();
+      }
+      if (!result?.containerId) {
+        throw new Error("CLI did not return a container ID");
+      }
+      logToFile(`[Resolver] Auto-build complete: ${result.containerId}`);
+      return result.containerId;
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logToFile(`[Resolver] Auto-build failed: ${message}`);
+      return {
+        type: "error",
+        message: `No dev container found for workspace: "${workspacePath}" and auto-build failed: ${message}`,
+      };
+    }
+  }
+
+  /**
+   * Ensure an existing container is running: if it is stopped, `docker start`
+   * it and poll inspect until it runs (or the timeout elapses). Returns an
+   * error result when the container could not be brought to a running state,
+   * or undefined when it is running.
+   */
+  private async ensureContainerRunning(
+    containerId: string,
+  ): Promise<ResolveResult | undefined> {
+    let info: ContainerInfo;
+    try {
+      info = await dockerInspect(containerId, {
+        dockerPath: this.dockerPath,
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logToFile(
+        `[Resolver] ERROR inspecting container before start: ${message}`,
+      );
+      return {
+        type: "error",
+        message: `Failed to inspect container "${containerId}": ${message}`,
+      };
+    }
+    if (info.state.running) {
+      return undefined;
+    }
+
+    logToFile(
+      `[Resolver] Container "${containerId}" is ${info.state.status}; attempting docker start`,
+    );
+    const startResult = await execFilePromise(this.dockerPath, [
+      "start",
+      containerId,
+    ]);
+    if (startResult.exitCode !== 0) {
+      logToFile(`[Resolver] docker start failed: ${startResult.stderr}`);
+      return {
+        type: "error",
+        message: `Failed to start container "${containerId}": ${startResult.stderr || `exit ${startResult.exitCode}`}`,
+      };
+    }
+    logToFile(`[Resolver] docker start issued; polling until running`);
+
+    const deadline = Date.now() + this.startTimeoutMs;
+    let lastStatus = info.state.status;
+    while (Date.now() < deadline) {
+      await sleep(this.startPollIntervalMs);
+      try {
+        const pollInfo = await dockerInspect(containerId, {
+          dockerPath: this.dockerPath,
+        });
+        lastStatus = pollInfo.state.status;
+        if (pollInfo.state.running) {
+          logToFile(`[Resolver] Container "${containerId}" is running`);
+          return undefined;
+        }
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        logToFile(`[Resolver] Start poll inspect failed: ${message}`);
+        lastStatus = message;
+      }
+    }
+
+    logToFile(
+      `[Resolver] Timed out waiting for container "${containerId}" to start`,
+    );
+    return {
+      type: "error",
+      message: `Container "${containerId}" did not start within ${Math.round(this.startTimeoutMs / 1000)}s (status: ${lastStatus})`,
+    };
   }
 
   /**
@@ -756,6 +933,7 @@ export class RemoteAuthorityResolver {
    *
    * Docker's --filter is AND-only, so we can't OR the artizo.* and
    * devcontainer.* labels in one call. Query each, dedup by ID.
+   * `-a` keeps STOPPED containers visible so recents-reopen can start them.
    * Returns the first matching container ID, or undefined.
    */
   async findContainerByLabel(
@@ -770,6 +948,7 @@ export class RemoteAuthorityResolver {
         const result = await execFilePromise(this.dockerPath, [
           "ps",
           "-q",
+          "-a",
           "--no-trunc",
           "--filter",
           `label=${label}=${workspacePath}`,
