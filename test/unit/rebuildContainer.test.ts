@@ -127,6 +127,7 @@ function createMockUI(overrides?: Partial<WorkflowUI>): WorkflowUI {
     }),
     showError: vi.fn().mockResolvedValue(undefined),
     showInfo: vi.fn().mockResolvedValue(undefined),
+    showWarning: vi.fn().mockResolvedValue(undefined),
     openWindow: vi.fn().mockResolvedValue(undefined),
     promptCreateConfig: vi.fn().mockResolvedValue(false),
     showBuildLog: vi.fn(),

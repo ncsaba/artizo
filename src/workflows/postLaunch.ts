@@ -180,6 +180,9 @@ export async function buildLookupLabels(params: {
   platformTarget: string;
   workspaceFolder: string;
   configPath?: string | null;
+  /** Accepted for symmetry with buildIdentityLabels (shared labelParams
+   * objects); never influences the stable lookup set. */
+  config?: Record<string, unknown>;
 }): Promise<string[]> {
   const { platformTarget, workspaceFolder, configPath } = params;
   return [
