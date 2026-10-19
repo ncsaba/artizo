@@ -470,6 +470,57 @@ export async function rebuildContainerHandler(
   }
 }
 
+/**
+ * Rebuild + reconnect variant used by the config-drift dialogs
+ * (configCheck.ts). Those prompts appear mid-resolve in a window that is
+ * TRYING to connect; running the no-reconnect `artizo.rebuildContainer`
+ * there leaves the window stranded — the build finishes, the pending
+ * resolve() errors out, and nothing reopens. This handler mirrors
+ * rebuildContainerHandler but ends with buildAuthorityAndOpen so the
+ * window reloads into the fresh container.
+ */
+export async function rebuildAndReopenHandler(
+  ctx: CommandContext,
+): Promise<void> {
+  const logger = getLogger();
+  const isManaged = isInDevContainerWindow();
+  const workspaceFolder = isManaged
+    ? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+    : getHostWorkspaceFolder();
+  if (!workspaceFolder) {
+    vscode.window.showErrorMessage("No workspace folder open.");
+    return;
+  }
+  try {
+    logger.info("=== Rebuild and Reopen starting ===");
+    ctx.buildLogTerminal.show(true);
+    ctx.buildLogPty.writeLine(
+      `${BRAND_PREFIX} Rebuild and Reopen starting...`,
+    );
+
+    if (isManaged) {
+      await relayRebuildToHost(false);
+      return;
+    }
+
+    guardHostContext();
+    await checkDockerAvailable(ctx.dockerPath);
+    guardHostContext();
+    ctx.buildLogPty.writeLine(`${BRAND_PREFIX} Workspace: ${workspaceFolder}`);
+    await rebuildContainer(ctx.deps, ctx.ui, {
+      workspaceFolder,
+      workspaceUri: vscode.workspace.workspaceFolders![0].uri,
+      noCache: false,
+      reconnect: true,
+    });
+    logger.info("=== Rebuild and Reopen completed ===");
+  } catch (err: unknown) {
+    const error = wrapError(err);
+    logger.error("Rebuild and Reopen failed", error);
+    await reportRebuildFailure(ctx, error, workspaceFolder);
+  }
+}
+
 export async function rebuildContainerNoCacheHandler(
   ctx: CommandContext,
 ): Promise<void> {
@@ -690,6 +741,12 @@ export function registerCoreCommands(
   context.subscriptions.push(
     vscode.commands.registerCommand("artizo.rebuildContainer", () =>
       rebuildContainerHandler(ctx),
+    ),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("artizo.rebuildAndReopen", () =>
+      rebuildAndReopenHandler(ctx),
     ),
   );
 

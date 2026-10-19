@@ -62,7 +62,9 @@ export async function checkContainerConfig(
     );
     if (action === "Rebuild") {
       log.info("[config-hash] user chose Rebuild (predates tracking)");
-      await vscode.commands.executeCommand("artizo.rebuildContainer");
+      // reconnect variant: this prompt appears mid-resolve in a window that
+      // is trying to connect — a no-reconnect rebuild would leave it stranded.
+      await vscode.commands.executeCommand("artizo.rebuildAndReopen");
       return "rebuild";
     }
     log.info("[config-hash] user chose Continue anyway (predates tracking)");
@@ -103,7 +105,8 @@ export async function checkContainerConfig(
   );
   if (action === "Rebuild") {
     log.info("[config-hash] user chose Rebuild (mismatch)");
-    await vscode.commands.executeCommand("artizo.rebuildContainer");
+    // reconnect variant — see the predates-tracking branch above.
+    await vscode.commands.executeCommand("artizo.rebuildAndReopen");
     return "rebuild";
   }
   log.info("[config-hash] user chose Continue anyway (mismatch)");

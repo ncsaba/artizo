@@ -412,6 +412,13 @@ while sleep 1 & wait $!; do :; done`, '-']; // `wait $!` allows for the `trap` t
 		...featureArgs,
 		...entrypoint,
 		...Object.keys(extraLabels).map(key => ['-l', `${key}=${extraLabels[key]}`]).flat(),
+		// Fork (javampire): apply additionalLabels to the RUN args, not just the
+		// image build. Upstream only passes them to `docker build --label` (see
+		// containerFeatures.ts), so for configs that use a prebuilt `image` —
+		// no build step — they silently never reach the container. Appending
+		// them AFTER extraLabels (image labels) also means the current values
+		// win over labels baked into a cached image.
+		...getLabels(params.additionalLabels || []),
 		imageName,
 		...cmd
 	];
