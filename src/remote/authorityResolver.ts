@@ -39,6 +39,7 @@ import {
   buildIdentityLabels,
   buildLookupLabels,
 } from "../workflows/postLaunch";
+import { clearPendingOpen } from "../workflows/pendingRemoteOpen";
 import { getPlatformAdapter } from "../platform";
 
 /** File-based logger that works regardless of window state. */
@@ -207,6 +208,28 @@ export class RemoteAuthorityResolver {
     const proxy = tryParseProxyPayload(id);
     if (proxy) {
       return this.resolveViaProxy(proxy);
+    }
+
+    // Pending-open watchdog handshake: a host-side flow that just issued
+    // `vscode.openFolder` for one of these authorities drops a marker in
+    // the workspace folder (`<id>/.devcontainer/.jvp-pending-remote-open.json`)
+    // and watches for proof the open took effect. resolve() starting IS
+    // that proof — clear the marker before any container lookup, so the
+    // issuer's watchdog knows not to re-issue the open. The proxy path
+    // above returns early (its id is an opaque relay payload, not a folder
+    // path), so there is nothing to clear there. Attached-container ids
+    // are container ids: the clear is a harmless no-op for them.
+    if (scheme === SCHEME_DEV_CONTAINER || scheme === SCHEME_ATTACHED_CONTAINER) {
+      try {
+        await clearPendingOpen({ fsPath: id });
+        logToFile(`[Resolver] pending-open marker cleared (open confirmed)`);
+      } catch (err: unknown) {
+        logToFile(
+          `[Resolver] pending-open marker clear failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
     }
 
     if (scheme === SCHEME_DEV_CONTAINER) {

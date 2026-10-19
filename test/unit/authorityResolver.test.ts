@@ -44,6 +44,8 @@ vi.mock("../../src/devcontainer/api", async (importOriginal) => {
   return { ...actual, launchProvision: mockLaunchProvision };
 });
 import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
 import { execFile } from "node:child_process";
 import * as vscode from "vscode";
 import {
@@ -53,6 +55,10 @@ import {
   SCHEME_ATTACHED_CONTAINER,
 } from "../../src/remote/authorityResolver";
 import { encodeAuthority } from "../../src/utils/uriUtils";
+import {
+  writePendingOpen,
+  readFreshPendingOpen,
+} from "../../src/workflows/pendingRemoteOpen";
 
 const mockExecFile = vi.mocked(execFile);
 
@@ -684,6 +690,70 @@ describe("RemoteAuthorityResolver - State 4 proxy path", () => {
     const result = await resolver.resolve(authority);
     expect(result.type).toBe("error");
     expect(mockStartManagedSshTunnel).not.toHaveBeenCalled();
+  });
+
+  describe("resolve - pending-open marker", () => {
+    /** Fresh temp dir standing in for the decoded local workspace folder. */
+    async function makeTmpDir(): Promise<string> {
+      return fs.promises.mkdtemp(
+        path.join(os.tmpdir(), "resolver-pending-open-"),
+      );
+    }
+
+    /** Null-op docker mock: no container found, auto-build fails fast. */
+    function setupMockForNoContainer() {
+      mockExecFile.mockImplementation((_cmd: any, _args: any, ...rest: any[]) => {
+        const cb = typeof rest[0] === "function" ? rest[0] : rest[1];
+        cb(null, "", "");
+        return {} as any;
+      });
+    }
+
+    it("clears a pre-existing pending-open marker in the decoded id dir", async () => {
+      const tmp = await makeTmpDir();
+      await writePendingOpen(
+        { fsPath: tmp },
+        { authority: "artizo-container+deadbeef", attempt: 1 },
+      );
+      setupMockForNoContainer();
+
+      const authority = encodeAuthority(SCHEME_DEV_CONTAINER, tmp);
+      const result = await resolver.resolve(authority);
+
+      // Resolution may fail (no container, no config) — irrelevant here: the
+      // marker must be cleared the moment resolve() starts for this id.
+      expect(result.type).toBe("error");
+      expect(await readFreshPendingOpen({ fsPath: tmp })).toBeNull();
+    });
+
+    it("leaves the marker alone for proxy authorities (opaque payload id)", async () => {
+      const tmp = await makeTmpDir();
+      await writePendingOpen(
+        { fsPath: tmp },
+        { authority: "artizo-container+deadbeef", attempt: 1 },
+      );
+      mockStartManagedSshTunnel.mockRejectedValue(
+        new Error("connection refused"),
+      );
+
+      const authority = encodeAuthority(
+        SCHEME_DEV_CONTAINER,
+        JSON.stringify({
+          proxy: true,
+          sshHost: "h",
+          sshUser: "u",
+          relayPort: 9,
+          connectionToken: "t",
+          workspacePath: "/w",
+          sshAuthority: "ssh-remote+pending-open-test",
+        }),
+      );
+      const result = await resolver.resolve(authority);
+
+      expect(result.type).toBe("error");
+      // The proxy path never touches the workspace marker protocol.
+      expect(await readFreshPendingOpen({ fsPath: tmp })).not.toBeNull();
+    });
   });
 
   it("dispose() tears down all spawned tunnels", async () => {

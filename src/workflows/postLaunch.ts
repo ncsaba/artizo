@@ -261,6 +261,35 @@ export async function finishBackgroundTasks(
 }
 
 /**
+ * How long to wait after `openWindow` resolves before checking whether the
+ * pending-open marker was cleared by the resolver (open took effect).
+ */
+export const PENDING_OPEN_WATCHDOG_DELAY_MS = 10_000;
+
+/** Max open attempts tracked in the pending-open marker before escalating. */
+const PENDING_OPEN_MAX_ATTEMPT = 2;
+
+/**
+ * Injectable scheduler so tests can capture (and deterministically await)
+ * the pending-open watchdog instead of arming a real 10s timer.
+ */
+type PendingOpenCheckScheduler = (
+  cb: () => void | Promise<void>,
+  delayMs: number,
+) => void;
+let schedulePendingOpenCheck: PendingOpenCheckScheduler = (cb, delayMs) => {
+  setTimeout(() => void cb(), delayMs);
+};
+
+/** Test hook: capture or restore the pending-open watchdog scheduler. */
+export function __setPendingOpenSchedulerForTests(
+  scheduler: PendingOpenCheckScheduler | null,
+): void {
+  schedulePendingOpenCheck =
+    scheduler ?? ((cb, delayMs) => void setTimeout(() => void cb(), delayMs));
+}
+
+/**
  * Build the container remote authority for the current execution tier and open
  * the window. Centralizes the tier lookup + buildContainerAuthority assembly +
  * openWindow tail shared by every launch workflow. Callers compute `uriPath`
@@ -297,10 +326,86 @@ export async function buildAuthorityAndOpen(params: {
     ui: params.ui,
   });
   const url = `vscode-remote://${authority}${params.uriPath}`;
+
+  // Pending-open watchdog (silent-abandon recovery): VSCodium's
+  // vscode.openFolder + forceReuseWindow path can silently abandon the
+  // window reload at the main-process unload handshake yet still resolve
+  // (observed on 1.140) — no reload, no resolver run, no error. Drop a
+  // marker into the workspace before opening; the resolver in the newly
+  // opened window clears it the moment resolve() starts. If the marker is
+  // still there when the watchdog fires, the open no-oped: re-issue it
+  // once, then escalate to the user. Dynamic import per this module's
+  // convention of keeping node:fs out of every consumer's bundle.
+  //
+  // Only flows whose authority id IS the local workspace folder can play
+  // this protocol — the resolver clears the marker at `<id>/.devcontainer/…`.
+  // Attached-container ids are container ids, and State 4 encodes an opaque
+  // proxy payload resolved via the proxy path; for both, the marker could
+  // never be cleared, so none is written and no watchdog is armed.
+  const isState4 =
+    tier.tier === ExecutionTier.RemoteSSH && tier.owner === "workspace";
+  const watchdogEligible = !isState4 && params.id === params.workspaceFolder;
+  const markerUri = { fsPath: params.workspaceFolder };
+  if (watchdogEligible) {
+    try {
+      const { writePendingOpen, readFreshPendingOpen } = await import(
+        "./pendingRemoteOpen.js"
+      );
+      const existing = await readFreshPendingOpen(markerUri);
+      const attempt = Math.min(
+        (existing?.attempt ?? 0) + 1,
+        PENDING_OPEN_MAX_ATTEMPT,
+      );
+      await writePendingOpen(markerUri, { authority, attempt });
+    } catch {
+      // Marker helpers never throw; this guards the open itself.
+    }
+  }
+
   if (params.windowOptions) {
     await params.ui.openWindow(url, params.windowOptions);
   } else {
     await params.ui.openWindow(url);
+  }
+
+  if (watchdogEligible) {
+    const reissue = () =>
+      params.windowOptions
+        ? params.ui.openWindow(url, params.windowOptions)
+        : params.ui.openWindow(url);
+    const runWatchdog = async (): Promise<void> => {
+      try {
+        const { readFreshPendingOpen, clearPendingOpen } = await import(
+          "./pendingRemoteOpen.js"
+        );
+        const still = await readFreshPendingOpen(markerUri);
+        if (!still) return; // resolver ran → the open took effect
+        if (still.attempt < PENDING_OPEN_MAX_ATTEMPT) {
+          getLogger().warn(
+            `[pendingRemoteOpen] marker still present after ${PENDING_OPEN_WATCHDOG_DELAY_MS}ms (attempt ${still.attempt}): window open was silently abandoned, re-issuing`,
+          );
+          await reissue();
+          return;
+        }
+        // Gave up: clear the marker so stale attempts don't accumulate,
+        // then let the user decide whether to try again.
+        await clearPendingOpen(markerUri);
+        const action = await params.ui.showWarning(
+          "[Javampire] Remote window open was ignored by the window. Workspace was NOT reopened.",
+          "Reopen",
+        );
+        if (action === "Reopen") {
+          await reissue();
+        }
+      } catch (err: unknown) {
+        getLogger().warn(
+          `[pendingRemoteOpen] watchdog check failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    };
+    schedulePendingOpenCheck(runWatchdog, PENDING_OPEN_WATCHDOG_DELAY_MS);
   }
 
   // Capture the folder we just opened for the Recent Folders list. Skip
@@ -308,8 +413,6 @@ export async function buildAuthorityAndOpen(params: {
   // there is the opaque `{ proxy: true, ... }` relay payload (ephemeral
   // relay port), not a stable reopenable key. The shared module's keyPrefix
   // keeps this history separate from zygos's SSH history.
-  const isState4 =
-    tier.tier === ExecutionTier.RemoteSSH && tier.owner === "workspace";
   if (!isState4) {
     try {
       const d = FolderDescriptor.fromUri(vscode.Uri.parse(url));

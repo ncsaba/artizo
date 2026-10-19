@@ -65,6 +65,10 @@ export interface WorkflowUI {
   ): Promise<void>;
   showError(message: string, ...actions: string[]): Promise<string | undefined>;
   showInfo(message: string, ...actions: string[]): Promise<string | undefined>;
+  showWarning(
+    message: string,
+    ...actions: string[]
+  ): Promise<string | undefined>;
   openWindow(
     uri: string,
     options?: { forceNewWindow?: boolean; forceReuseWindow?: boolean },

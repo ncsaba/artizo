@@ -29,6 +29,7 @@ function stubUi(): VscodeWorkflowUI {
     showProgress: vi.fn() as any,
     showError: vi.fn() as any,
     showInfo: vi.fn() as any,
+    showWarning: vi.fn() as any,
     openWindow: vi.fn() as any,
     promptCreateConfig: vi.fn() as any,
     showBuildLog: vi.fn() as any,

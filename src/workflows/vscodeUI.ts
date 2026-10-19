@@ -58,6 +58,13 @@ export class VscodeWorkflowUI implements WorkflowUI {
     return vscode.window.showInformationMessage(message, ...actions);
   }
 
+  async showWarning(
+    message: string,
+    ...actions: string[]
+  ): Promise<string | undefined> {
+    return vscode.window.showWarningMessage(message, ...actions);
+  }
+
   async openWindow(
     uri: string,
     options?: { forceNewWindow?: boolean; forceReuseWindow?: boolean },
