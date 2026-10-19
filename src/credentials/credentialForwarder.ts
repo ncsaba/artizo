@@ -6,6 +6,10 @@
 /**
  * Git credential forwarding into dev containers.
  *
+ * NOT YET WIRED — defined for future use. Not instantiated or called
+ * anywhere in the extension. Will be connected when HTTPS git credential
+ * forwarding is requested by users.
+ *
  * Writes a credential helper inside the container that delegates requests
  * back to the host's git credential system via docker exec.
  *
@@ -57,6 +61,7 @@ fi
 
 const HELPER_SCRIPT_PATH = "/tmp/.kiro-server/artizo-credential-helper.sh";
 
+// Future use: defined but not yet instantiated or called from any workflow.
 export class CredentialForwarder implements ICredentialForwarder {
   private readonly host: Host;
   private readonly hostContainerRef: string | undefined;

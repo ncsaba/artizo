@@ -23,7 +23,7 @@ vi.mock("vscode", () => ({
   ProgressLocation: { Notification: 15 },
   ExtensionKind: { UI: 1, Workspace: 2 },
   env: { remoteAuthority: undefined, remoteName: undefined },
-  workspace: { workspaceFolders: [] },
+  workspace: { workspaceFolders: [], getConfiguration: vi.fn().mockReturnValue({ get: vi.fn(() => undefined) }) },
   Uri: { parse: (s: string) => ({ toString: () => s }) },
 }));
 
@@ -66,6 +66,7 @@ vi.mock("../../src/devcontainer/api", async () => {
     launch,
     launchProvision,
     withDefaults: vi.fn().mockImplementation((o: Record<string, unknown>) => o),
+    dotfilesFromConfig: vi.fn().mockReturnValue({}),
     ContainerError: class extends Error {
       description = "mock error";
     },
@@ -124,6 +125,7 @@ function createMockServerManager(
     getStatus: vi.fn().mockResolvedValue(null),
     getCompatibleVersion: vi.fn().mockReturnValue("1.96.0"),
     getUserExtensionsDir: vi.fn().mockResolvedValue("/tmp/test-extensions"),
+    preflightRemoteUser: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -165,6 +167,12 @@ describe("cloneInVolume", () => {
       serverManager: createMockServerManager(),
       gitConfigCopier: createMockGitConfigCopier(),
       dockerPath: "docker",
+      folderHistory: {
+        addFolders: vi.fn().mockResolvedValue(undefined),
+        removeFolder: vi.fn().mockResolvedValue(false),
+        getFolders: () => [],
+        getRemotes: () => [],
+      } as any,
       extensionInstaller: {
         installFromConfig: vi.fn().mockResolvedValue([]),
         installExtensions: vi.fn().mockResolvedValue([]),
@@ -192,8 +200,8 @@ describe("cloneInVolume", () => {
     expect(result).toBeDefined();
     expect(result!.containerId).toBe("abc123");
     expect(launch).toHaveBeenCalled();
-    expect(deps.serverManager.ensureInstalled).toHaveBeenCalledWith("abc123");
-    expect(deps.serverManager.start).toHaveBeenCalledWith("abc123");
+    expect(deps.serverManager.ensureInstalled).toHaveBeenCalledWith("abc123", "vscode");
+    expect(deps.serverManager.start).toHaveBeenCalledWith("abc123", undefined, undefined);
     expect(ui.openWindow).toHaveBeenCalled();
   });
 

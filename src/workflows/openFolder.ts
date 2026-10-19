@@ -7,7 +7,11 @@ import * as vscode from "vscode";
 import { URI } from "vscode-uri";
 import { BRAND, BRAND_PREFIX } from "../utils/constants";
 import type { BuildResult, WorkflowDependencies, WorkflowUI } from "./types";
-import { launchProvision, withDefaults } from "../devcontainer/api";
+import {
+  launchProvision,
+  withDefaults,
+  dotfilesFromConfig,
+} from "../devcontainer/api";
 import { ProvisionFailedError } from "../devcontainer/provisionError";
 import { getPlatformAdapter } from "../platform";
 import {
@@ -18,6 +22,7 @@ import {
   throwIfCancelled,
   CancelledError,
 } from "./postLaunch";
+import { resolveConfigVars } from "../devcontainer/readResolvedConfig";
 import type { ReadConfigResult } from "../config/configManager";
 
 export interface OpenFolderUI extends WorkflowUI {
@@ -80,6 +85,16 @@ export async function openFolderInContainer(
       configResult.config as Record<string, unknown> | undefined
     )?.["disableCopyGitConfig"];
 
+    // Resolve ${localEnv:...} and friends across the full config in one
+    // place — workspaceFolder, remoteEnv, etc. — so the resolved config
+    // flows to connectToContainer → start() without leaking literal
+    // ${localEnv:...} strings into the server env (issue #12).
+    const resolvedConfig = await resolveConfigVars(
+      folder,
+      configResult.configPath,
+      configResult.config as Record<string, unknown> | undefined,
+    );
+
     // Build phase
     let result:
       | {
@@ -103,6 +118,7 @@ export async function openFolderInContainer(
           config: configResult.config as Record<string, unknown> | undefined,
         });
         const options = withDefaults({
+          ...dotfilesFromConfig(vscode.workspace.getConfiguration()),
           workspaceFolder: folder,
           configFile: configFile ? URI.file(configFile) : undefined,
           additionalLabels: idLabels,
@@ -136,7 +152,8 @@ export async function openFolderInContainer(
       ui,
       buildResult.containerId,
       perContainerDisable,
-      configResult!.config as Record<string, unknown> | undefined,
+      resolvedConfig,
+      buildResult.remoteUser,
     );
 
     ui.showInfo(

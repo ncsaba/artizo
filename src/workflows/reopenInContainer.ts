@@ -8,6 +8,7 @@ import { URI } from "vscode-uri";
 import { BRAND, BRAND_PREFIX } from "../utils/constants";
 import type { BuildResult, WorkflowDependencies, WorkflowUI } from "./types";
 import { launchProvision, withDefaults } from "../devcontainer/api";
+import { resolveConfigVars } from "../devcontainer/readResolvedConfig";
 import { ProvisionFailedError } from "../devcontainer/provisionError";
 import { getPlatformAdapter } from "../platform";
 import { getLogger } from "../utils/logger";
@@ -25,6 +26,7 @@ import type { ReadConfigResult } from "../config/configManager";
 export interface ReopenInContainerParams {
   workspaceFolder: string;
   workspaceUri: vscode.Uri;
+  forceNewWindow?: boolean;
 }
 
 export async function reopenInContainer(
@@ -33,7 +35,7 @@ export async function reopenInContainer(
   params: ReopenInContainerParams,
 ): Promise<void> {
   const { configManager } = deps;
-  const { workspaceFolder, workspaceUri } = params;
+  const { workspaceFolder, workspaceUri, forceNewWindow } = params;
 
   let configResult: ReadConfigResult;
   let perContainerDisable = false;
@@ -68,6 +70,17 @@ export async function reopenInContainer(
       perContainerDisable = !!(
         configResult.config as Record<string, unknown> | undefined
       )?.["disableCopyGitConfig"];
+
+      // Resolve ${localEnv:...} and friends across the full config in one
+      // place — workspaceFolder, remoteEnv, etc. — so the resolved config
+      // flows to connectToContainer → start() without leaking literal
+      // ${localEnv:...} strings into the server env (issue #12) or into the
+      // remote window URI.
+      const resolvedConfig = await resolveConfigVars(
+        workspaceFolder,
+        configResult.configPath,
+        configResult.config as Record<string, unknown> | undefined,
+      );
 
       // Phase 2: Build (skip if existing container found)
       progress.report({ message: "Checking for existing container..." });
@@ -141,43 +154,90 @@ export async function reopenInContainer(
         if (checkResult === "rebuild") {
           return; // rebuild command opens its own window
         }
-        // The ps -a lookup includes stopped containers (matching the official
-        // extension). A stopped container must be started before docker exec
-        // works downstream; `docker start` on a running container is a no-op.
-        const startResult = await dockerExecPolicy([
-          "start",
-          existingContainerId,
-        ]);
-        if (startResult.exitCode !== 0) {
-          throw new Error(
-            `Failed to start existing container ${existingContainerId.slice(0, 12)}: ${startResult.stderr}`,
+        // Reconnect via the CLI so lifecycle hooks run (postStartCommand,
+        // postAttachCommand). One-time hooks (onCreateCommand,
+        // updateContentCommand, postCreateCommand) are skipped by the
+        // CLI's marker-file logic. This matches the official extension,
+        // which calls `devcontainer up --expect-existing-container`.
+        //
+        // If the CLI can't find the container by labels (e.g. config file
+        // moved, or container created by another tool), fall back to
+        // manual `docker start` — hooks won't run, but the container is
+        // reused rather than orphaned.
+        const idLabels = await buildIdentityLabels({
+          platformTarget,
+          workspaceFolder,
+          configPath: configResult.configPath,
+          config: configResult.config as Record<string, unknown> | undefined,
+        });
+        const reconnectOptions = withDefaults({
+          workspaceFolder,
+          additionalLabels: idLabels,
+          configFile: configResult.configPath
+            ? URI.file(configResult.configPath)
+            : undefined,
+          expectExistingContainer: true,
+          removeExistingContainer: false,
+          log: (text: string) => ui.showBuildLog(text),
+        });
+        try {
+          const result = await launchProvision(
+            reconnectOptions,
+            configResult.configPath,
+            undefined,
+            idLabels,
           );
+          await finishBackgroundTasks(result);
+          if (!result?.containerId) {
+            throw new Error("CLI did not return a container ID");
+          }
+          buildResult = {
+            containerId: result.containerId,
+            remoteUser: result.remoteUser,
+            remoteWorkspaceFolder: result.remoteWorkspaceFolder,
+          };
+        } catch (err) {
+          if (
+            err instanceof Error &&
+            err.message.includes("expected container does not exist")
+          ) {
+            getLogger().warn(
+              `[reopen] CLI could not find container by labels; falling back to manual start`,
+            );
+            const { dockerExecPolicy } = await import(
+              "../docker/execPolicy.js"
+            );
+            const startResult = await dockerExecPolicy([
+              "start",
+              existingContainerId,
+            ]);
+            if (startResult.exitCode !== 0) {
+              throw new Error(
+                `Failed to start existing container ${existingContainerId.slice(0, 12)}: ${startResult.stderr}`,
+              );
+            }
+            const cfg = resolvedConfig as Record<string, unknown>;
+            const basename =
+              workspaceFolder.split(/[\\/]/).filter(Boolean).pop() ?? "";
+            // resolvedConfig was already substituted above (resolveConfigVars).
+            // No second call needed here.
+            buildResult = {
+              containerId: existingContainerId,
+              remoteUser:
+                typeof cfg.remoteUser === "string"
+                  ? cfg.remoteUser
+                  : typeof cfg.containerUser === "string"
+                    ? cfg.containerUser
+                    : "",
+              remoteWorkspaceFolder:
+                typeof cfg.workspaceFolder === "string"
+                  ? cfg.workspaceFolder
+                  : `/workspaces/${basename}`,
+            };
+          } else {
+            throw err;
+          }
         }
-        getLogger().info(
-          `[reopen] started existing container ${existingContainerId.slice(0, 12)}`,
-        );
-        // Derive identity from devcontainer.json. workspaceFolder is
-        // authoritative from config (or the CLI default /workspaces/<basename>);
-        // remoteUser is NOT derivable from config when the image sets USER in
-        // its Dockerfile, so leave it empty when unspecified rather than guess.
-        // (remoteUser is not consumed by the reopen path; only the workspace
-        // path is. Inspect the container's user if a consumer ever needs it.)
-        const cfg = configResult.config as Record<string, unknown>;
-        const basename =
-          workspaceFolder.split(/[\\/]/).filter(Boolean).pop() ?? "";
-        buildResult = {
-          containerId: existingContainerId,
-          remoteUser:
-            typeof cfg.remoteUser === "string"
-              ? cfg.remoteUser
-              : typeof cfg.containerUser === "string"
-                ? cfg.containerUser
-                : "",
-          remoteWorkspaceFolder:
-            typeof cfg.workspaceFolder === "string"
-              ? cfg.workspaceFolder
-              : `/workspaces/${basename}`,
-        };
       } else {
         const extraRunArgs = (
           await getPlatformAdapter()
@@ -257,7 +317,8 @@ export async function reopenInContainer(
         ui,
         buildResult.containerId,
         perContainerDisable,
-        configResult!.config as Record<string, unknown> | undefined,
+        resolvedConfig,
+        buildResult.remoteUser,
         progress,
         token,
       );
@@ -277,7 +338,9 @@ export async function reopenInContainer(
         workspaceFolder,
         workspacePath: remotePath,
         uriPath: remotePath.startsWith("/") ? remotePath : "/" + remotePath,
-        windowOptions: { forceReuseWindow: true },
+        windowOptions: forceNewWindow
+          ? { forceNewWindow: true }
+          : { forceReuseWindow: true },
       });
     });
 

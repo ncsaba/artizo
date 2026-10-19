@@ -1,17 +1,5 @@
 import { defineConfig } from "vitest/config";
 
-// Test defaults: Kiro feature set
-const testFlags = {
-  HAS_SECCOMP_UNCONFINED: JSON.stringify(false),
-  HAS_HOME_SYMLINK: JSON.stringify(false),
-  HAS_ARGV_PATCH: JSON.stringify(true),
-  HAS_KIRO_ADAPTER: JSON.stringify(true),
-  HAS_TRAE_ADAPTER: JSON.stringify(false),
-  HAS_DEVIN_ADAPTER: JSON.stringify(false),
-  HAS_VSCODIUM_ADAPTER: JSON.stringify(false),
-  ARTIZO_SPIKE: JSON.stringify(false),
-};
-
 export default defineConfig({
   test: {
     setupFiles: ["./test/setup.ts"],
@@ -26,6 +14,10 @@ export default defineConfig({
       reporter: ["text", "lcov", "html"],
       include: ["src/**/*.ts"],
       exclude: [
+        // Vendored devcontainers CLI: loaded in-process by readResolvedConfig
+        // tests, but not our code to test. Excluded so the overall number
+        // reflects artizo src only.
+        "vendor/**",
         "src/**/*.test.ts",
         "src/**/*.property.test.ts",
         "src/cli/devcontainerCli.ts",
@@ -37,9 +29,5 @@ export default defineConfig({
         "src/views/**",
       ],
     },
-  },
-  define: {
-    __TARGET__: JSON.stringify(process.env.TARGET || "kiro"),
-    ...testFlags,
   },
 });

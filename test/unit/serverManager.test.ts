@@ -56,10 +56,7 @@ const { mockReadKiroToken } = vi.hoisted(() => ({
 
 vi.mock("../../src/platform", () => ({
   getPlatformAdapter: vi.fn().mockResolvedValue({
-    readAuthToken: mockReadKiroToken,
-    getAuthTokenPath: vi
-      .fn()
-      .mockReturnValue(".aws/sso/cache/kiro-auth-token.json"),
+    readAuthFiles: mockReadKiroToken,
     getServerInstallRoot: vi.fn(),
     name: "Kiro",
     serverApplicationName: "kiro-server",
@@ -73,6 +70,7 @@ vi.mock("../../src/platform", () => ({
 
 vi.mock("node:crypto", () => ({
   randomUUID: () => "test-uuid-1234-5678-abcd-ef0123456789",
+  randomBytes: () => Buffer.from("0123456789abcdef", "hex"),
 }));
 
 import {
@@ -80,6 +78,7 @@ import {
   validateArch,
   buildStartCommand,
   parseProbeOutput,
+  isValidDockerUser,
   type ServerManagerOptions,
 } from "../../src/remote/serverManager";
 import type { ProductInfo } from "../../src/remote/productInfo";
@@ -109,15 +108,24 @@ let mockHost = createMockHost();
 /**
  * Helper to set up sequential mock responses for host.dockerExec.
  * Each call to dockerExec will consume the next response in the array.
+ * A response with `probeFields` emits the probeContainer nonce-marker
+ * format: the nonce is extracted from the command's ARTPROBE marker.
  */
 function setupExecFileResponses(
-  responses: Array<{ stdout: string; stderr?: string; exitCode?: number }>,
+  responses: Array<{
+    stdout?: string;
+    stderr?: string;
+    exitCode?: number;
+    probeFields?: [string, string, string, string];
+    /** Marks the response consumed by `probeUserEnv` (cat /proc/self/environ). */
+    userEnvProbe?: boolean;
+  }>,
 ) {
   mockHost.dockerExec.mockReset();
   let callIndex = 0;
 
   mockHost.dockerExec.mockImplementation(
-    (_containerId: string, _command: string[], _options?: any) => {
+    (_containerId: string, command: string[], _options?: any) => {
       const response = responses[callIndex] ?? {
         stdout: "",
         stderr: "",
@@ -125,12 +133,29 @@ function setupExecFileResponses(
       };
       callIndex++;
 
-      const { stdout, stderr = "", exitCode = 0 } = response;
+      let stdout = response.stdout ?? "";
+      if (response.probeFields) {
+        const m = command.join(" ").match(/ARTPROBE-[0-9a-f]+/);
+        stdout = `${m?.[0] ?? "ARTPROBE-unknown"}\n${response.probeFields.join("\n")}\n`;
+      }
+      if (response.userEnvProbe) {
+        // probeUserEnv runs `<shell> <flag> 'echo -n <nonce>; cat
+        // /proc/self/environ; echo -n <nonce>'`. Synthesize a nonce-delimited
+        // body with a dummy env var so the probe returns a non-empty env and
+        // does not fall back to printenv (which would consume an extra
+        // response and shift call indices).
+        const m = command
+          .join(" ")
+          .match(new RegExp("echo -n ([^;]+); cat /proc/self/environ"));
+        const nonce = m?.[1] ?? "unknown-nonce";
+        stdout = `${nonce}DUMMY=1${nonce}`;
+      }
+      const { stderr = "", exitCode = 0 } = response;
 
       if (exitCode !== 0) {
-        return Promise.resolve({ exitCode, stdout: stdout ?? "", stderr });
+        return Promise.resolve({ exitCode, stdout, stderr });
       }
-      return Promise.resolve({ exitCode: 0, stdout: stdout ?? "", stderr });
+      return Promise.resolve({ exitCode: 0, stdout, stderr });
     },
   );
 }
@@ -168,6 +193,59 @@ describe("serverManager", () => {
       expect(() => validateArch("mips")).toThrow(
         'Unsupported architecture: "mips"',
       );
+    });
+  });
+
+  describe("isValidDockerUser", () => {
+    it("accepts POSIX usernames", () => {
+      expect(isValidDockerUser("dev")).toBe(true);
+      expect(isValidDockerUser("vscode")).toBe(true);
+      expect(isValidDockerUser("_dev")).toBe(true);
+      expect(isValidDockerUser("dev-user")).toBe(true);
+      expect(isValidDockerUser("dev_user")).toBe(true);
+      expect(isValidDockerUser("user123")).toBe(true);
+    });
+
+    it("accepts numeric uids", () => {
+      expect(isValidDockerUser("0")).toBe(true);
+      expect(isValidDockerUser("1000")).toBe(true);
+      expect(isValidDockerUser("65534")).toBe(true);
+    });
+
+    it("accepts uid:gid pairs", () => {
+      expect(isValidDockerUser("1000:1000")).toBe(true);
+      expect(isValidDockerUser("0:0")).toBe(true);
+    });
+
+    it("rejects argument injection attempts", () => {
+      expect(isValidDockerUser("--privileged")).toBe(false);
+      expect(isValidDockerUser("--user=root")).toBe(false);
+      expect(isValidDockerUser("-u")).toBe(false);
+      expect(isValidDockerUser("-v")).toBe(false);
+    });
+
+    it("rejects shell metacharacters", () => {
+      expect(isValidDockerUser("FOO;BAR:baz")).toBe(false);
+      expect(isValidDockerUser("dev;rm -rf /")).toBe(false);
+      expect(isValidDockerUser("dev$(whoami)")).toBe(false);
+      expect(isValidDockerUser("dev`whoami`")).toBe(false);
+      expect(isValidDockerUser("dev|cat")).toBe(false);
+      expect(isValidDockerUser("dev && whoami")).toBe(false);
+    });
+
+    it("rejects empty and whitespace", () => {
+      expect(isValidDockerUser("")).toBe(false);
+      expect(isValidDockerUser(" ")).toBe(false);
+      expect(isValidDockerUser("dev user")).toBe(false);
+    });
+
+    it("rejects uppercase usernames", () => {
+      expect(isValidDockerUser("Dev")).toBe(false);
+      expect(isValidDockerUser("DEV")).toBe(false);
+    });
+
+    it("rejects usernames starting with a digit", () => {
+      expect(isValidDockerUser("1dev")).toBe(false);
     });
   });
 
@@ -321,8 +399,8 @@ describe("serverManager", () => {
     describe("ensureInstalled", () => {
       it("skips installation when binary is already present", async () => {
         setupExecFileResponses([
-          // probeContainer: arch:::commit:::present
-          { stdout: `x86_64:::${TEST_PRODUCT_INFO.commit}:::yes` },
+          // probeContainer: arch, commit, present, PATH
+          { probeFields: ["x86_64", TEST_PRODUCT_INFO.commit, "yes", "/usr/bin:/bin"] },
         ]);
 
         const info = await manager.ensureInstalled("container1");
@@ -338,8 +416,8 @@ describe("serverManager", () => {
 
       it("installs when binary is not present", async () => {
         setupExecFileResponses([
-          // probeContainer: arch:::commit:::not-present
-          { stdout: `x86_64:::${TEST_PRODUCT_INFO.commit}:::no` },
+          // probeContainer: arch, commit, not-present, PATH
+          { probeFields: ["x86_64", TEST_PRODUCT_INFO.commit, "no", "/usr/bin:/bin"] },
           // installServer: finalize (patch+move)
           { stdout: "" },
         ]);
@@ -350,23 +428,25 @@ describe("serverManager", () => {
         expect(info.arch).toBe("x64");
         // 2 dockerExec: probe + finalize (bootstrap/deploy/setup are mocks)
         expect(mockHost.dockerExec).toHaveBeenCalledTimes(2);
-        expect(mockBootstrapBusybox).toHaveBeenCalledWith("container1", "x64");
-        expect(mockDeployTools).toHaveBeenCalledWith("container1");
+        expect(mockBootstrapBusybox).toHaveBeenCalledWith("container1", "x64", undefined);
+        expect(mockDeployTools).toHaveBeenCalledWith("container1", undefined);
         expect(mockRunSetup).toHaveBeenCalledWith(
           "container1",
           expect.any(String),
           expect.any(String),
-          undefined,
-          expect.any(String),
+          [],
           expect.any(Buffer),
+          undefined,
         );
       });
 
-      it("passes kiro auth token to runSetup when adapter provides it", async () => {
-        mockReadKiroToken.mockReturnValue('{"token":"mock"}');
+      it("passes kiro auth files to runSetup when adapter provides them", async () => {
+        mockReadKiroToken.mockReturnValue([
+          { path: ".aws/sso/cache/kiro-auth-token.json", content: '{"token":"mock"}' },
+        ]);
 
         setupExecFileResponses([
-          { stdout: `x86_64:::${TEST_PRODUCT_INFO.commit}:::no` },
+          { probeFields: ["x86_64", TEST_PRODUCT_INFO.commit, "no", "/usr/bin:/bin"] },
           // installServer: finalize
           { stdout: "" },
         ]);
@@ -377,15 +457,15 @@ describe("serverManager", () => {
           "container1",
           expect.any(String),
           expect.any(String),
-          '{"token":"mock"}',
-          expect.any(String),
+          [{ path: ".aws/sso/cache/kiro-auth-token.json", content: '{"token":"mock"}' }],
           expect.any(Buffer),
+          undefined,
         );
       });
 
       it("installs on arm64 when binary is not present", async () => {
         setupExecFileResponses([
-          { stdout: `aarch64:::${TEST_PRODUCT_INFO.commit}:::no` },
+          { probeFields: ["aarch64", TEST_PRODUCT_INFO.commit, "no", "/usr/bin:/bin"] },
           // installServer: finalize
           { stdout: "" },
         ]);
@@ -398,12 +478,13 @@ describe("serverManager", () => {
         expect(mockBootstrapBusybox).toHaveBeenCalledWith(
           "container1",
           "arm64",
+          undefined,
         );
       });
 
       it("throws when bootstrap busybox fails", async () => {
         setupExecFileResponses([
-          { stdout: `x86_64:::${TEST_PRODUCT_INFO.commit}:::no` },
+          { probeFields: ["x86_64", TEST_PRODUCT_INFO.commit, "no", "/usr/bin:/bin"] },
         ]);
 
         mockBootstrapBusybox.mockRejectedValue(new Error("readFile ENOENT"));
@@ -417,7 +498,7 @@ describe("serverManager", () => {
 
       it("throws when setup script fails", async () => {
         setupExecFileResponses([
-          { stdout: `x86_64:::${TEST_PRODUCT_INFO.commit}:::no` },
+          { probeFields: ["x86_64", TEST_PRODUCT_INFO.commit, "no", "/usr/bin:/bin"] },
         ]);
 
         mockRunSetup.mockRejectedValue(
@@ -501,10 +582,10 @@ describe("serverManager", () => {
           { stdout: "my-connection-token\n" },
           // probe: no pidFile
           { stdout: "NONE\n" },
-          // stop: cat pidFile (no existing server)
-          { stdout: "", exitCode: 1 },
-          // stop: pgrep fallback (no existing server)
-          { stdout: "", exitCode: 1 },
+          // stop: single sh -c (no existing server)
+          { stdout: "" },
+          // userEnvProbe (synthesized nonce-delimited env)
+          { userEnvProbe: true },
           // nohup start command (background)
           { stdout: "" },
           // waitForPort: cat logFile
@@ -529,10 +610,10 @@ describe("serverManager", () => {
           { stdout: "my-token\n" },
           // probe: no pidFile
           { stdout: "NONE\n" },
-          // stop: cat pidFile (no existing server)
-          { stdout: "", exitCode: 1 },
-          // stop: pgrep fallback (no existing server)
-          { stdout: "", exitCode: 1 },
+          // stop: single sh -c (no existing server)
+          { stdout: "" },
+          // userEnvProbe
+          { userEnvProbe: true },
           // nohup start command
           { stdout: "" },
           // waitForPort: cat logFile
@@ -541,7 +622,7 @@ describe("serverManager", () => {
 
         await manager.start("container1");
 
-        // The nohup start command is the 6th call (index 5)
+        // The nohup start command is the 7th call (index 6)
         const startCallArgs = mockHost.dockerExec.mock.calls[6];
         const args = startCallArgs[1] as string[];
         const shCmdIndex = args.indexOf("-c");
@@ -567,10 +648,10 @@ describe("serverManager", () => {
           { stdout: "my-token\n" },
           // probe: no pidFile
           { stdout: "NONE\n" },
-          // stop: cat pidFile (no existing server)
-          { stdout: "", exitCode: 1 },
-          // stop: pgrep fallback (no existing server)
-          { stdout: "", exitCode: 1 },
+          // stop: single sh -c (no existing server)
+          { stdout: "" },
+          // userEnvProbe
+          { userEnvProbe: true },
           // nohup start command
           { stdout: "" },
           // waitForPort: cat logFile
@@ -597,10 +678,10 @@ describe("serverManager", () => {
           { stdout: "arm-token\n" },
           // probe: no pidFile
           { stdout: "NONE\n" },
-          // stop: cat pidFile (no existing server)
-          { stdout: "", exitCode: 1 },
-          // stop: pgrep fallback (no existing server)
-          { stdout: "", exitCode: 1 },
+          // stop: single sh -c (no existing server)
+          { stdout: "" },
+          // userEnvProbe
+          { userEnvProbe: true },
           // nohup start command
           { stdout: "" },
           // waitForPort: cat logFile
@@ -622,10 +703,10 @@ describe("serverManager", () => {
           { stdout: "my-token\n" },
           // probe: no pidFile
           { stdout: "NONE\n" },
-          // stop: cat pidFile (no existing server)
-          { stdout: "", exitCode: 1 },
-          // stop: pgrep fallback (no existing server)
-          { stdout: "", exitCode: 1 },
+          // stop: single sh -c (no existing server)
+          { stdout: "" },
+          // userEnvProbe
+          { userEnvProbe: true },
           // nohup start fails
           { stdout: "", stderr: "No such file or directory", exitCode: 127 },
         ]);
@@ -645,10 +726,10 @@ describe("serverManager", () => {
           { stdout: "my-token\n" },
           // probe: no pidFile
           { stdout: "NONE\n" },
-          // stop: cat pidFile (no existing server)
-          { stdout: "", exitCode: 1 },
-          // stop: pgrep fallback (no existing server)
-          { stdout: "", exitCode: 1 },
+          // stop: single sh -c (no existing server)
+          { stdout: "" },
+          // userEnvProbe
+          { userEnvProbe: true },
           // nohup start command
           { stdout: "" },
           // waitForPort: cat logFile
@@ -674,10 +755,10 @@ describe("serverManager", () => {
           { stdout: "my-token\n" },
           // probe: no pidFile
           { stdout: "NONE\n" },
-          // stop: cat pidFile (no existing server)
-          { stdout: "", exitCode: 1 },
-          // stop: pgrep fallback (no existing server)
-          { stdout: "", exitCode: 1 },
+          // stop: single sh -c (no existing server)
+          { stdout: "" },
+          // userEnvProbe
+          { userEnvProbe: true },
           // nohup start command
           { stdout: "" },
           // waitForPort: cat logFile (returns error in log)
@@ -720,10 +801,10 @@ describe("serverManager", () => {
           { stdout: "my-token\n" },
           // probe: dead pid
           { stdout: "DEAD:1234\n" },
-          // stop: cat pidFile (already removed by probe)
-          { stdout: "", exitCode: 1 },
-          // stop: pgrep fallback
-          { stdout: "", exitCode: 1 },
+          // stop: single sh -c (pidFile already removed by probe)
+          { stdout: "" },
+          // userEnvProbe
+          { userEnvProbe: true },
           // nohup start command
           { stdout: "" },
           // waitForPort: cat logFile
@@ -744,12 +825,10 @@ describe("serverManager", () => {
           { stdout: "my-token\n" },
           // probe: unresponsive
           { stdout: "UNRESPONSIVE:1234:8080\n" },
-          // stop: cat pidFile
-          { stdout: "1234\n" },
-          // stop: kill -TERM
+          // stop: single sh -c (kills pid from pidFile, removes it)
           { stdout: "" },
-          // stop: rm pidFile
-          { stdout: "" },
+          // userEnvProbe
+          { userEnvProbe: true },
           // nohup start command
           { stdout: "" },
           // waitForPort: cat logFile
@@ -827,85 +906,51 @@ describe("serverManager", () => {
     });
 
     describe("stop", () => {
-      it("stops via PID file when available", async () => {
+      it("issues a single sh -c script that kills via pidFile or pgrep", async () => {
         setupExecFileResponses([
           // resolveServerCommit: glob finds product.json with commit
           { stdout: JSON.stringify({ commit: TEST_PRODUCT_INFO.commit }) },
-          // cat pidFile succeeds
-          { stdout: "12345\n" },
-          // kill succeeds
-          { stdout: "" },
-          // rm pidFile
+          // single sh -c stop script (container handles pidFile/pgrep)
           { stdout: "" },
         ]);
 
         await manager.stop("container1");
 
-        // Verify kill was called with SIGTERM (glob=[0], cat=[1], kill=[2])
-        const killCallArgs = mockHost.dockerExec.mock.calls[2];
-        const args = killCallArgs[1] as string[];
-        expect(args).toContain("kill");
-        expect(args).toContain("-TERM");
-        expect(args).toContain("12345");
+        // 2 calls: resolveServerCommit + the combined sh -c stop script
+        expect(mockHost.dockerExec).toHaveBeenCalledTimes(2);
+
+        const stopCallArgs = mockHost.dockerExec.mock.calls[1];
+        expect(stopCallArgs[0]).toBe("container1");
+        const args = stopCallArgs[1] as string[];
+        expect(args[0]).toBe("sh");
+        expect(args[1]).toBe("-c");
+        const script = args[2] as string;
+        // Reads the pidFile via cat
+        expect(script).toContain("cat");
+        expect(script).toContain("server.pid");
+        // Kills via SIGTERM
+        expect(script).toContain("kill -TERM");
+        // Removes stale pidFile
+        expect(script).toContain("rm -f");
+        // pgrep fallback for orphaned servers
+        expect(script).toContain("pgrep");
+        expect(script).toContain("-f");
+        expect(script).toContain("kiro-reh");
+        expect(script).toContain("--connection-token-file");
       });
 
-      it("falls back to pgrep when PID file missing", async () => {
+      it("does not throw when no server process is found", async () => {
         setupExecFileResponses([
           // resolveServerCommit: glob finds product.json with commit
           { stdout: JSON.stringify({ commit: TEST_PRODUCT_INFO.commit }) },
-          // cat pidFile fails
-          { stdout: "", exitCode: 1 },
-          // pgrep finds PID
-          { stdout: "12345\n" },
-          // kill succeeds
+          // single sh -c stop script (no pidFile, pgrep finds nothing)
           { stdout: "" },
         ]);
 
         await manager.stop("container1");
 
-        // Verify pgrep searched for kiro-reh (glob=[0], cat=[1], pgrep=[2])
-        const pgrepCallArgs = mockHost.dockerExec.mock.calls[2];
-        const args = pgrepCallArgs[1] as string[];
-        expect(args).toContain("pgrep");
-        expect(args).toContain("-f");
-        expect(args[2]).toContain("kiro-reh");
-        expect(args[2]).toContain("--connection-token-file");
-      });
-
-      it("handles multiple PIDs from pgrep fallback", async () => {
-        setupExecFileResponses([
-          // resolveServerCommit: glob finds product.json with commit
-          { stdout: JSON.stringify({ commit: TEST_PRODUCT_INFO.commit }) },
-          // cat pidFile fails
-          { stdout: "", exitCode: 1 },
-          // pgrep finds multiple PIDs
-          { stdout: "12345\n67890\n" },
-          // kill first
-          { stdout: "" },
-          // kill second
-          { stdout: "" },
-        ]);
-
-        await manager.stop("container1");
-
-        // 5 calls: glob, cat, pgrep, kill, kill
-        expect(mockHost.dockerExec).toHaveBeenCalledTimes(5);
-      });
-
-      it("does nothing when no server process is found", async () => {
-        setupExecFileResponses([
-          // resolveServerCommit: glob finds product.json with commit
-          { stdout: JSON.stringify({ commit: TEST_PRODUCT_INFO.commit }) },
-          // cat pidFile fails
-          { stdout: "", exitCode: 1 },
-          // pgrep finds nothing
-          { stdout: "", exitCode: 1 },
-        ]);
-
-        await manager.stop("container1");
-
-        // 3 calls (glob + cat pidFile + pgrep), no kill
-        expect(mockHost.dockerExec).toHaveBeenCalledTimes(3);
+        // 2 calls (resolveServerCommit + sh -c), no separate kill call
+        expect(mockHost.dockerExec).toHaveBeenCalledTimes(2);
       });
     });
 
@@ -982,8 +1027,8 @@ describe("serverManager", () => {
     describe("download URL construction", () => {
       it("passes server download URL to bootstrap runSetup", async () => {
         setupExecFileResponses([
-          // probeContainer: arch:::commit:::not-present
-          { stdout: `x86_64:::${TEST_PRODUCT_INFO.commit}:::no` },
+          // probeContainer: arch, commit, not-present, PATH
+          { probeFields: ["x86_64", TEST_PRODUCT_INFO.commit, "no", "/usr/bin:/bin"] },
           // installServer: finalize (patch+move)
           { stdout: "" },
         ]);
@@ -1014,10 +1059,10 @@ describe("serverManager", () => {
           { stdout: "my-token\n" },
           // probe: no pidFile
           { stdout: "NONE\n" },
-          // stop: cat pidFile (no existing server)
-          { stdout: "", exitCode: 1 },
-          // stop: pgrep fallback (no existing server)
-          { stdout: "", exitCode: 1 },
+          // stop: single sh -c (no existing server)
+          { stdout: "" },
+          // userEnvProbe
+          { userEnvProbe: true },
           // nohup start command
           { stdout: "" },
           // waitForPort: cat logFile
@@ -1026,7 +1071,7 @@ describe("serverManager", () => {
 
         await customManager.start("container1");
 
-        // The nohup start command is the 6th call (index 5)
+        // The nohup start command is the 7th call (index 6)
         const startCallArgs = mockHost.dockerExec.mock.calls[6];
         const args = startCallArgs[1] as string[];
         const shCmdIndex = args.indexOf("-c");

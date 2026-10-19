@@ -34,15 +34,11 @@ import { ExecutionTier } from "./state";
 import { patchArgvContent } from "./argvPatch";
 import type { Host } from "./host";
 
-// VSCodium is the default (else) branch in getArgvExtensionId, so its flag
-// isn't referenced here.
-declare const HAS_TRAE_ADAPTER: boolean;
-declare const HAS_KIRO_ADAPTER: boolean;
-declare const HAS_DEVIN_ADAPTER: boolean;
 import { ConfigWatcher } from "../config/configWatcher";
 import { ContainerLifecycle } from "../lifecycle/containerLifecycle";
 import { SidebarProvider } from "../sidebar/provider";
 import { ContainerExplorerProvider } from "../views/containerExplorer";
+import { FolderHistoryManager } from "../remote/folderHistory";
 
 /**
  * Extension settings read from workspace configuration.
@@ -69,15 +65,35 @@ export function readSettings(): ExtensionSettings {
  * argv.json wins. If none exist, the first candidate is created.
  */
 
-/** Resolve the extension ID for argv.json from build-time adapter flags. */
+/**
+ * Resolve this extension's own ID for argv.json. Read from the extension's
+ * own package.json (baked into the VSIX at build time) so the right ID is
+ * returned for whichever VSIX is installed — no build-time flags.
+ */
+let _extensionId: string | undefined;
+
+/** @internal Test-only override for the detected extension ID. */
+export function _setExtensionIdForTest(id: string | undefined): void {
+  _extensionId = id;
+}
+
 export function getArgvExtensionId(): string {
-  return HAS_KIRO_ADAPTER
-    ? "javampire.artizo-kiro"
-    : HAS_TRAE_ADAPTER
-      ? "javampire.artizo-trae"
-      : HAS_DEVIN_ADAPTER
-        ? "javampire.artizo-devin"
-        : "javampire.artizo-vscodium";
+  if (_extensionId) return _extensionId;
+  try {
+    // The bundled JS lives at <extroot>/dist/extension/extension.js.
+    // package.json is two levels up from __dirname, at the extension root.
+    const pkgPath = nodePath.join(__dirname, "..", "..", "package.json");
+    const pkg = JSON.parse(nodeFs.readFileSync(pkgPath, "utf-8"));
+    const name = typeof pkg.name === "string" ? pkg.name : "artizo";
+    const publisher =
+      typeof pkg.publisher === "string" ? pkg.publisher : "javampire";
+    _extensionId = `${publisher}.${name}`;
+  } catch {
+    // Reading our own package.json should never fail in a built VSIX.
+    // Fall back to the vscodium ID (the catch-all per the runtime plan).
+    _extensionId = "javampire.artizo-vscodium";
+  }
+  return _extensionId;
 }
 
 async function ensureArgvProposedApi(
@@ -221,68 +237,6 @@ export function createBuildLogTerminal(context: vscode.ExtensionContext): {
 }
 
 /**
- * Validate the platform runtime and register stub handlers if mismatched.
- * Returns false if the extension should abort activation.
- */
-export async function validatePlatformRuntime(
-  context: vscode.ExtensionContext,
-): Promise<boolean> {
-  const platformAdapter = await getPlatformAdapter();
-  if (platformAdapter.isValidRuntime()) {
-    return true;
-  }
-
-  const expected = platformAdapter.name;
-  const logger = getLogger();
-  let actual = "unknown";
-  let actualDisplay = "";
-  try {
-    const productPath = nodePath.join(vscode.env.appRoot, "product.json");
-    const product = JSON.parse(nodeFs.readFileSync(productPath, "utf-8"));
-    actual = product?.applicationName ?? "unknown";
-    actualDisplay = product?.nameShort ?? product?.nameLong ?? "";
-  } catch {
-    /* ignore */
-  }
-
-  const actualLabel = actualDisplay ? `${actualDisplay} (${actual})` : actual;
-
-  const message = `${BRAND}: This extension is built for ${expected}. It cannot run on ${actualLabel}. Please install the correct extension for your editor.`;
-  logger.error(message);
-  vscode.window.showErrorMessage(message);
-
-  // Replace the sidebar with a persistent explanation so the user sees
-  // the problem every time they open the Artizo panel.
-  const sidebarHtml =
-    "<!DOCTYPE html>" +
-    '<html lang="en"><head><meta charset="UTF-8">' +
-    "<style>" +
-    "body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 24px; margin: 0; }" +
-    "h2 { color: var(--vscode-errorForeground); }" +
-    "p { line-height: 1.5; }" +
-    "</style></head><body>" +
-    "<h2>Wrong Extension</h2>" +
-    "<p>You installed <strong>Artizo for " +
-    expected +
-    "</strong>, but this appears to be <strong>" +
-    actualLabel +
-    "</strong>.</p>" +
-    "<p>Open the Extensions panel (Ctrl+Shift+X) and uninstall this extension, " +
-    "then install the Artizo build that matches your editor.</p>" +
-    "</body></html>";
-
-  context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider("artizo.sidebar", {
-      resolveWebviewView(webviewView: vscode.WebviewView) {
-        webviewView.webview.html = sidebarHtml;
-      },
-    }),
-  );
-
-  return false;
-}
-
-/**
  * Handle argv.json patching: prompt restart if the API entry was just added
  * or if resolvers are still unavailable. Returns true if activation should
  * abort (restart needed).
@@ -414,6 +368,14 @@ export function createServices(
 ): CreatedServices {
   const logger = getLogger();
 
+  // Recent-folder history for the container explorer. Namespaced per
+  // extension so it never collides with zygos's SSH history when both are
+  // installed. Captured at the open path (see buildAuthorityAndOpen).
+  const folderHistory = new FolderHistoryManager({
+    state: context.globalState,
+    keyPrefix: "artizo",
+  });
+
   const configManager = new ConfigManager();
 
   const serverManager = new ServerManager({
@@ -457,6 +419,7 @@ export function createServices(
     gitConfigCopier,
     extensionInstaller,
     dockerPath: settings.dockerPath,
+    folderHistory,
   };
 
   // Register tree views, sidebar, and config watcher (local only)
@@ -509,7 +472,7 @@ export function createServices(
   );
 
   // Register the container explorer (host-side only).
-  ContainerExplorerProvider.register(context);
+  ContainerExplorerProvider.register(context, folderHistory);
 
   logger.info("Sidebar and config watcher registered");
 

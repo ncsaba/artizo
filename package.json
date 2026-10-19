@@ -2,7 +2,7 @@
   "name": "artizo",
   "displayName": "Artizo Dev Containers",
   "description": "Develop inside Docker containers. Define your environment as code with devcontainer.json for isolated, reproducible development.",
-  "version": "0.6.2",
+  "version": "0.8.8",
   "publisher": "javampire",
   "productName": "Artizo",
   "license": "AGPL-3.0-only",
@@ -72,6 +72,11 @@
         "category": "Dev Containers (Artizo)"
       },
       {
+        "command": "artizo.reopenInContainerNewWindow",
+        "title": "Artizo: Reopen in Container (New Window)",
+        "category": "Dev Containers (Artizo)"
+      },
+      {
         "command": "artizo.reopenInHost",
         "title": "Artizo: Return to Host",
         "category": "Dev Containers (Artizo)"
@@ -129,6 +134,11 @@
       {
         "command": "artizo.cloneInVolume",
         "title": "Artizo: Clone Repo URL in Volume",
+        "category": "Dev Containers (Artizo)"
+      },
+      {
+        "command": "artizo.createVolume",
+        "title": "Artizo: Create Volume",
         "category": "Dev Containers (Artizo)"
       },
       {
@@ -223,8 +233,8 @@
         "category": "Dev Containers (Artizo)"
       },
       {
-        "command": "artizo.explorer.removeRecentFolder",
-        "title": "Artizo: Remove from Recent",
+        "command": "artizo.explorer.forgetFolder",
+        "title": "Forget",
         "category": "Dev Containers (Artizo)",
         "icon": "$(trash)"
       },
@@ -238,12 +248,6 @@
         "title": "Artizo: Remove Volume",
         "category": "Dev Containers (Artizo)",
         "icon": "$(trash)"
-      },
-      {
-        "command": "artizo.explorer.cloneInVolume",
-        "title": "Artizo: Clone Repo in Volume",
-        "category": "Dev Containers (Artizo)",
-        "icon": "$(repo-clone)"
       }
     ],
     "views": {
@@ -251,7 +255,7 @@
         {
           "type": "webview",
           "id": "artizo.sidebar",
-          "name": "",
+          "name": "Artizo Dev Containers",
           "when": "artizo.hostContext || remoteName =~ /^artizo-container|attached-container/",
           "remoteName": [
             "artizo-container",
@@ -291,29 +295,23 @@
           "group": "remote_30_artizo-container_2_actions@0"
         },
         {
-          "command": "artizo.rebuildContainerMenu",
+          "command": "artizo.reopenInContainerNewWindow",
           "when": "workspaceFolderCount != 0 && artizo.hostContext && artizo.hasDevcontainerConfig",
           "group": "remote_30_artizo-container_2_actions@1"
         },
         {
-          "command": "artizo.openFolderInContainer",
-          "when": "artizo.hostContext",
+          "command": "artizo.rebuildContainerMenu",
+          "when": "workspaceFolderCount != 0 && artizo.hostContext && artizo.hasDevcontainerConfig",
           "group": "remote_30_artizo-container_2_actions@2"
         },
         {
-          "command": "artizo.openFolderInContainerNewWindow",
-          "when": "artizo.hostContext",
-          "group": "remote_30_artizo-container_2_actions@3"
-        },
-        {
-          "command": "artizo.cleanUpContainers",
-          "when": "artizo.hostContext",
-          "group": "remote_30_artizo-container_2_actions@5"
+          "command": "artizo.revealLogTerminal",
+          "group": "remote_30_artizo-container_2_actions@9"
         },
         {
           "command": "artizo.reopenInHost",
           "when": "remoteName =~ /^artizo-container/",
-          "group": "remote_30_artizo-container_2_actions@9"
+          "group": "remote_30_artizo-container_2_actions@10"
         },
         {
           "command": "artizo.reopenInHost",
@@ -324,10 +322,6 @@
           "command": "artizo.revealLogTerminal",
           "when": "remoteName =~ /^ssh-remote$/",
           "group": "remote_20_ssh-remote_1general@10"
-        },
-        {
-          "command": "artizo.revealLogTerminal",
-          "group": "remote_30_artizo-container_2_actions@10"
         }
       ],
       "view/title": [
@@ -409,7 +403,7 @@
           "group": "navigation@2"
         },
         {
-          "command": "artizo.explorer.removeRecentFolder",
+          "command": "artizo.explorer.forgetFolder",
           "when": "view == artizo.explorer && viewItem == recent-folder",
           "group": "navigation@9"
         },
@@ -417,11 +411,6 @@
           "command": "artizo.explorer.inspectVolume",
           "when": "view == artizo.explorer && viewItem == volume",
           "group": "navigation@1"
-        },
-        {
-          "command": "artizo.explorer.cloneInVolume",
-          "when": "view == artizo.explorer && viewItem == volume",
-          "group": "navigation@2"
         },
         {
           "command": "artizo.explorer.removeVolume",
@@ -468,20 +457,12 @@
         "artizo.dotfiles.installCommand": {
           "type": "string",
           "default": "",
-          "description": "Command to run after cloning dotfiles."
+          "markdownDescription": "Command to run after cloning dotfiles. See [dotfiles.github.io](https://dotfiles.github.io/) for background and examples."
         },
         "artizo.dotfiles.targetPath": {
           "type": "string",
           "default": "~/dotfiles",
           "description": "Target path for dotfiles inside the container."
-        },
-        "artizo.defaultExtensions": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extensions to install in every dev container."
         },
         "artizo.dockerPath": {
           "type": "string",
@@ -576,9 +557,9 @@
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.85.0",
     "@types/yauzl": "^3.4.0",
-    "@vitest/coverage-v8": "^4.1.8",
-    "@vscode/vsce": "^3.9.2",
-    "esbuild": "^0.25.0",
+    "@vitest/coverage-v8": "^5.0.1",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
     "eslint": "^10.8.0",
     "fast-check": "^3.23.0",
     "knip": "^6.15.0",
@@ -586,6 +567,10 @@
     "typescript": "^5.8.0",
     "typescript-eslint": "^8.0.0",
     "upng-js": "^2.1.0",
-    "vitest": "^4.1.8"
+    "vite": "^8.3.0",
+    "vitest": "^5.0.1"
+  },
+  "overrides": {
+    "@vscode/vsce": "^4.0.0"
   }
 }

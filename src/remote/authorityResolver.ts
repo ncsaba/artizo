@@ -28,6 +28,15 @@ import { startManagedSshTunnel, type TunnelController } from "./sshTunnel";
 import { startExecServerBridge, type ExecServer as ExecServerLike } from "./execServerBridge";
 import { startAskpass } from "../ssh/askpass";
 import { checkContainerConfig } from "./configCheck";
+import {
+  launchProvision,
+  withDefaults,
+  dotfilesFromConfig,
+} from "../devcontainer/api";
+import { resolveConfigVars } from "../devcontainer/readResolvedConfig";
+import { URI } from "vscode-uri";
+import { buildIdentityLabels } from "../workflows/postLaunch";
+import { getPlatformAdapter } from "../platform";
 
 /** File-based logger that works regardless of window state. */
 const LOG_FILE = path.join(os.tmpdir(), "artizo-resolver.log");
@@ -478,6 +487,69 @@ export class RemoteAuthorityResolver {
   }
 
   /**
+   * Run devcontainer lifecycle hooks (postStartCommand, postAttachCommand)
+   * on an existing container via the CLI. One-time hooks are skipped by
+   * the CLI's marker logic. Best-effort: failures are logged but don't
+   * block the resolve (the server can still start without hooks).
+   */
+  private async runLifecycleHooks(
+    containerInfo: ContainerInfo,
+  ): Promise<void> {
+    const workspaceFolder =
+      containerInfo.config.labels["artizo.local_folder"] ||
+      containerInfo.config.labels["devcontainer.local_folder"];
+    const configPath =
+      containerInfo.config.labels["artizo.config_file"] ||
+      containerInfo.config.labels["devcontainer.config_file"];
+
+    if (!workspaceFolder) {
+      logToFile(
+        "[Resolver] No workspace folder label; skipping lifecycle hooks",
+      );
+      return;
+    }
+
+    try {
+      const adapter = await getPlatformAdapter();
+      const platformTarget = adapter.name.toLowerCase();
+      const idLabels = await buildIdentityLabels({
+        platformTarget,
+        workspaceFolder,
+        configPath,
+        config: undefined,
+      });
+
+      const options = withDefaults({
+        ...dotfilesFromConfig(vscode.workspace.getConfiguration()),
+        workspaceFolder,
+        additionalLabels: idLabels,
+        configFile: configPath ? URI.file(configPath) : undefined,
+        expectExistingContainer: true,
+        removeExistingContainer: false,
+        log: (text: string) => logToFile(`[Resolver] [lifecycle] ${text}`),
+      });
+
+      logToFile(`[Resolver] Running lifecycle hooks via CLI...`);
+      const result = await launchProvision(
+        options,
+        configPath,
+        undefined,
+        idLabels,
+      );
+      logToFile(`[Resolver] Lifecycle hooks complete`);
+      // Finish any background tasks the CLI started (e.g. non-blocking hooks).
+      if (result?.finishBackgroundTasks) {
+        await result.finishBackgroundTasks();
+      }
+    } catch (err: unknown) {
+      // Best-effort: don't block the resolve if hooks fail. The server
+      // can still start without them.
+      const message = err instanceof Error ? err.message : String(err);
+      logToFile(`[Resolver] Lifecycle hooks failed (non-blocking): ${message}`);
+    }
+  }
+
+  /**
    * Resolve a container by its ID, verify it's running, and return connection info.
    */
   private async resolveContainerById(
@@ -520,10 +592,60 @@ export class RemoteAuthorityResolver {
 
     if (this.serverManager) {
       try {
+        // Run lifecycle hooks (postStartCommand, postAttachCommand) via
+        // the CLI before installing the server. One-time hooks
+        // (onCreateCommand, etc.) are skipped by the CLI's marker logic.
+        // Labels on the container carry the workspace folder + config path,
+        // both local to wherever this resolver runs (apex for local,
+        // remote-ssh host for dual-hop — same side that has Docker).
+        await this.runLifecycleHooks(containerInfo);
+
+        // Recover remoteUser (from our label) and containerUser (from
+        // Config.User) so re-attach runs install/start as the right user
+        // instead of defaulting to root. Both come from the existing
+        // dockerInspect call above — no new docker calls.
+        const remoteUser =
+          containerInfo.config.labels["artizo.remote_user"];
+        const containerUser =
+          containerInfo.config.user &&
+          containerInfo.config.user !== "root"
+            ? containerInfo.config.user
+            : undefined;
+        const user = remoteUser || containerUser;
+
+        // Read the devcontainer.json from the config-file label so the
+        // env probe gets `userEnvProbe` and `remoteEnv`. If the file is
+        // gone or unreadable (e.g. cloned into a volume and since
+        // deleted), pass undefined — the probe uses the default
+        // loginInteractiveShell and remoteEnv is skipped.
+        const configFilePath =
+          containerInfo.config.labels["artizo.config_file"] ||
+          containerInfo.config.labels["devcontainer.config_file"];
+        const workspaceFolderLabel =
+          containerInfo.config.labels["artizo.local_folder"] ||
+          containerInfo.config.labels["devcontainer.local_folder"];
+        let reattachConfig: Record<string, unknown> | undefined;
+        if (configFilePath && workspaceFolderLabel) {
+          reattachConfig = await resolveConfigVars(
+            workspaceFolderLabel,
+            configFilePath,
+            undefined,
+          );
+          if (!reattachConfig) {
+            logToFile(
+              `[Resolver] devcontainer.json not readable at ${configFilePath}; using probe defaults`,
+            );
+          }
+        }
+
         logToFile(`[Resolver] Ensuring server is installed...`);
-        await this.serverManager.ensureInstalled(containerId);
+        await this.serverManager.ensureInstalled(containerId, user);
         logToFile(`[Resolver] Starting server...`);
-        const serverInfo = await this.serverManager.start(containerId);
+        const serverInfo = await this.serverManager.start(
+          containerId,
+          user,
+          reattachConfig,
+        );
         logToFile(
           `[Resolver] Server started on container port ${serverInfo.port}`,
         );

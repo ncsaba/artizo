@@ -1,5 +1,129 @@
 # Changelog
 
+## 0.8.8
+
+### Changed
+
+- Platform and AI adapter selection now reads `product.json` at runtime instead of compile-time flags, so any VSIX works in any IDE. `validatePlatformRuntime` removed.
+
+### Fixed
+
+- Dev-dep advisories (6 high): `@vscode/vsce` bumped to 4.0.0 with `overrides` forcing ovsx's nested vsce to 4.0.0, pruning the secretlint/braces chain.
+
+## 0.8.7
+
+### Fixed
+
+- `~` is now expanded in `artizo.sshPath` (e.g. `~/bin/ssh`).
+
+## 0.8.6
+
+### Fixed
+
+- Extensions from `customizations.vscode.extensions` now install as application-scoped so they appear in every profile, not just the Default (#13).
+
+## 0.8.5
+
+### Added
+
+- `userEnvProbe` (default `loginInteractiveShell`): probe the remote user's login-shell env on cold start and inject it into the server so integrated terminals, tasks, and debug adapters inherit the full env instead of the bare image env. Shell comes from the existing getent call and PATH from probeContainer, so no new round-trips.
+
+### Fixed
+
+- `${localEnv:...}` and friends now resolved across the whole config — `remoteEnv`, `workspaceFolder`, etc. — before reaching the server. Previously only `workspaceFolder` was substituted (#12).
+
+## 0.8.4
+
+### Fixed
+
+- Probe output (container probe, ssh home probe) now anchors on a per-invocation nonce marker, so shell-init output can't corrupt the parsed fields.
+
+## 0.8.3
+
+### Fixed
+
+- Save/restore busybox PATH so it does not leak busybox coreutils into the vscodium server. (Parallel of zygos #5)
+- Dev-dep advisories: `vitest`/`@vitest/mocker` (GHSA-82fw-gwwq-j7x9) and `js-yaml` (GHSA-2883-xcg3-v3hh) via vitest 4→5 bump and transitive update.
+- Fixes for various lint warnings from the dep updates.
+
+## 0.8.2
+
+### Fixed
+
+- Extensions from `customizations.vscode.extensions` never installed (#11): missing destination mkdir before tar extraction, Windows-apex tar modes producing non-traversable dirs, and PATH-probed tar instead of the bootstrapped busybox.
+- "Workspace does not exist" on reopen (#12): devcontainer variables in `workspaceFolder` are now resolved before building the remote window URI.
+
+## 0.8.1
+
+### Fixed
+
+- Kiro AI assist updated to match changes in Kiro's agent API.
+
+## 0.8.0
+
+### Added
+
+- Dotfiles support: `artizo.dotfiles.*` settings (repo, target, install command) wired into `withDefaults` via `dotfilesFromConfig()`. Clones and installs on container create/reopen/rebuild/clone-in-volume.
+- `artizo.createVolume` command and sidebar button — creates an empty managed volume with name prompt.
+
+### Changed
+
+- Sidebar icons switched from emoji/unicode to codicons throughout (container/volume/command rows, chevrons, tab icons, refresh buttons). Codicon CSS+TTF are static files in `resources/sidebar/`.
+- Sidebar accordion open/close now animated via `grid-template-rows` transition (0.15s ease). Containers, volumes, config, and command groups use a unified `.accordion-group` wrapper.
+- `renderCommands` accordions default to open.
+- "Open Different Folder in Container" → "Open a Folder in Container" (and New Window variant).
+- Removed `artizo.explorer.cloneInVolume` command (duplicate of `artizo.cloneInVolume`).
+- AI assist prompt (`generate.md`) gives generic host-OS-aware guidance for display forwarding (Linux native, WSL/WSLg, XQuartz) and detects GUI toolkits (Qt, GTK, wxWidgets, Tkinter, PyQt, Electron) and GPU/CUDA, instead of emitting specific mount syntax.
+
+### Removed
+
+- X11 and Wayland display socket toggles. They only worked in narrow host-OS cases; the AI assist prompt now guides users generically.
+
+### Fixed
+
+- Sidebar horizontal jitter when the scrollbar appears/disappears. `.panel` now uses `flex: 1; min-height: 0`.
+
+## 0.7.1
+
+### Fixed
+
+- Auth token forwarding now includes the `<clientIdHash>.json` registration sibling so the remote can refresh its own tokens. Previously only `kiro-auth-token.json` was forwarded; the remote would sign out ~1 hour into every session.
+- `tools/setup.sh`: auth file writes are atomic (temp + mv) and non-fatal on read-only bind-mounts. HOME detection moved before auth writes.
+- Reconnect now runs `postStartCommand` and `postAttachCommand` via the CLI's `launchProvision({expectExistingContainer: true})` instead of a bare `docker start`. Previously lifecycle hooks were silently skipped on reconnect (X11 display failures, etc.).
+- `resolveContainerById` path also runs lifecycle hooks (best-effort, non-blocking) before server install.
+
+## 0.7.0
+
+### Added
+
+- "Reopen in Container (New Window)" command (`><` menu and sidebar).
+- Recent folders in the Remote Explorer, grouped per container authority, with a working Forget context menu.
+- `remoteUser` saved as docker label `artizo.remote_user` at build; restored on re-attach so install/start run as the right user instead of root.
+- `containerUser` read from `docker inspect` `Config.User` as fallback when `remoteUser` is absent or missing in the image.
+- `preflightRemoteUser` validates via `getent passwd` and caches per container.
+- `isValidDockerUser` rejects argument injection before `docker exec -u`.
+- `remoteUser`/`containerUser` threaded through `gitConfigCopier`, `serverManager`, and `bootstrap`.
+- `src/utils/tar.ts` factored out of `bootstrap.ts`; used to stream extension installs as `remoteUser`.
+- `folderHistory.ts` (and test) shared from zygos via `make sync-shared`.
+
+### Changed
+
+- `><` menu: "Return to Host" moved to end of section (just before "Close Remote Connection").
+- `><` menu: removed "Clean Up Dev Containers", "Open Folder in Container", and "Open Folder in Container (New Window)".
+- `removeRecentFolder` → `forgetFolder` (title "Forget").
+- Recent folder groups labeled by workspace basename; attached containers show "Container <short-id>".
+- Folder history tree auto-refreshes via `FolderHistoryManager.onDidChange`.
+- README template system restored: `{{section:name}}` placeholders flow from `BEGIN/END` blocks in README.md.
+- Vendor READMEs: added "Reduces friction..." line, added `## License` header, relocated AI-assisted setup section.
+- `dockerCp` removed from `dockerUtils.ts`.
+
+### Fixed
+
+- Re-attach path defaulted to root for install/start when `remoteUser` was set in `devcontainer.json`.
+- Extensions installed via `docker cp` were root-owned; now written as `remoteUser`.
+- Recent folders never populated (dead `globalState` store); replaced with `FolderHistoryManager`.
+- Stale upgrade notes removed from README and vendor templates.
+
 ## 0.6.2
 
 - Patch transitive deps (brace-expansion, fast-uri)
