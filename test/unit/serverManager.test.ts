@@ -414,6 +414,22 @@ describe("serverManager", () => {
         expect(mockHost.dockerExec).toHaveBeenCalledTimes(1);
       });
 
+      it("re-provisions busybox and tools when server is already installed", async () => {
+        // The server binary can persist on a volume across container
+        // rebuilds, but /tmp/.artizo/bin (busybox/nohup, tar, relay) is
+        // ephemeral. The already-installed fast path must still re-provision
+        // it, or start() fails on the absolute /tmp/.artizo/bin/nohup path.
+        setupExecFileResponses([
+          // probeContainer: arch, commit, present, PATH
+          { probeFields: ["x86_64", TEST_PRODUCT_INFO.commit, "yes", "/usr/bin:/bin"] },
+        ]);
+
+        await manager.ensureInstalled("container1");
+
+        expect(mockBootstrapBusybox).toHaveBeenCalledWith("container1", "x64", undefined);
+        expect(mockDeployTools).toHaveBeenCalledWith("container1", undefined);
+      });
+
       it("installs when binary is not present", async () => {
         setupExecFileResponses([
           // probeContainer: arch, commit, not-present, PATH

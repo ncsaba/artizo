@@ -561,6 +561,21 @@ export class ServerManager implements IServerManager {
       await this.installServer(containerId, arch, resolvedUser);
     } else {
       getLogger().info(`[install] already installed, skipping download`);
+      // The server binary can outlive its tools: installs may live on a
+      // persistent volume (e.g. a bind-mounted server root) while the
+      // busybox polyfill under /tmp/.artizo/bin is ephemeral and lost on
+      // container rebuild. start() invokes nohup by absolute path from
+      // that dir (and extension install uses its tar), so re-run the
+      // idempotent provisioning steps installServer would have done.
+      if (this.bootstrap) {
+        await this.bootstrap.bootstrapBusybox(containerId, arch, resolvedUser);
+        await this.bootstrap.deployTools(containerId, resolvedUser);
+      } else {
+        getLogger().warn(
+          `[install] server already installed but no bootstrap available; ` +
+            `skipping busybox/tools re-provision`,
+        );
+      }
     }
 
     const installRoot = await this.getServerInstallRoot(containerId);
