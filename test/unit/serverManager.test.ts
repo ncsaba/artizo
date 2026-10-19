@@ -396,6 +396,92 @@ describe("serverManager", () => {
       });
     });
 
+    describe("version-gated install adoption", () => {
+      const CLIENT_VERSION = "1.140.06880";
+
+      function createVersionedManager(version: string): ServerManager {
+        return new ServerManager({
+          productInfo: { ...TEST_PRODUCT_INFO, version },
+          extensionPath: "/fake/path",
+          host: mockHost as any,
+        });
+      }
+
+      it("adopts a glob-matched install whose product.json version matches the client (custom-REH case)", async () => {
+        const customCommit = "cust0mrehc0mmit1";
+        setupExecFileResponses([
+          // resolveServerCommit: glob finds a same-version/different-commit
+          // install (documented custom-REH case) — must still be adopted.
+          { stdout: JSON.stringify({ commit: customCommit, version: CLIENT_VERSION }) },
+          // test -f binaryPath under the custom commit's install dir
+          { stdout: "" },
+        ]);
+
+        const versioned = createVersionedManager(CLIENT_VERSION);
+        const present = await versioned.isServerBinaryPresent("container1");
+
+        expect(present).toBe(true);
+        // The binary was probed in the custom REH commit's dir, not the IDE's.
+        const testCmd = mockHost.dockerExec.mock.calls[1][1].join(" ");
+        expect(testCmd).toContain(
+          `bin/${customCommit}/bin/${TEST_PRODUCT_INFO.serverApplicationName}`,
+        );
+      });
+
+      it("does not adopt a glob-matched install built for a different client version (stale install)", async () => {
+        const staleCommit = "sta1ec0mmit12345";
+        setupExecFileResponses([
+          // resolveServerCommit: glob finds a stale install (older client
+          // release) that survived an IDE update on a persistent
+          // bind-mounted root. Must NOT be adopted.
+          { stdout: JSON.stringify({ commit: staleCommit, version: "1.135.06055" }) },
+          // test -f binaryPath: must target the IDE commit dir, which is
+          // absent → binaryPresent=false → matching server gets installed.
+          { stdout: "", exitCode: 1 },
+        ]);
+
+        const versioned = createVersionedManager(CLIENT_VERSION);
+        const present = await versioned.isServerBinaryPresent("container1");
+
+        // The stale commit dir was NOT adopted: the binary test ran against
+        // the IDE commit's dir (absent there → fresh install needed).
+        const testCmd = mockHost.dockerExec.mock.calls[1][1].join(" ");
+        expect(testCmd).toContain(
+          `bin/${TEST_PRODUCT_INFO.commit}/bin/${TEST_PRODUCT_INFO.serverApplicationName}`,
+        );
+        expect(testCmd).not.toContain(staleCommit);
+        expect(present).toBe(false);
+      });
+
+      it("probe command includes the version gate when the client version is set", async () => {
+        setupExecFileResponses([
+          // probeContainer: arch, commit, present, PATH
+          { probeFields: ["x86_64", TEST_PRODUCT_INFO.commit, "yes", "/usr/bin:/bin"] },
+        ]);
+
+        const versioned = createVersionedManager(CLIENT_VERSION);
+        await versioned.ensureInstalled("container1");
+
+        const probeCmd = mockHost.dockerExec.mock.calls[0][1].join(" ");
+        expect(probeCmd).toContain(`v='${CLIENT_VERSION}'`);
+        expect(probeCmd).toContain(`grep -q "\\"version\\": \\"$v\\""`);
+      });
+
+      it("probe command omits the version gate when the client version is empty", async () => {
+        setupExecFileResponses([
+          // probeContainer: arch, commit, present, PATH
+          { probeFields: ["x86_64", TEST_PRODUCT_INFO.commit, "yes", "/usr/bin:/bin"] },
+        ]);
+
+        const unversioned = createVersionedManager("");
+        await unversioned.ensureInstalled("container1");
+
+        const probeCmd = mockHost.dockerExec.mock.calls[0][1].join(" ");
+        expect(probeCmd).not.toContain(`v=''`);
+        expect(probeCmd).not.toContain("grep -q");
+      });
+    });
+
     describe("ensureInstalled", () => {
       it("skips installation when binary is already present", async () => {
         setupExecFileResponses([

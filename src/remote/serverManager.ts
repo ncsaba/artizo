@@ -339,8 +339,9 @@ export class ServerManager implements IServerManager {
    *
    * Returns the cached value if already resolved (from a prior install
    * or glob). Otherwise globs for product.json under bin/ in the
-   * server data dir and reads the commit field. If no install exists
-   * or the product.json lacks a commit, falls back to the IDE's commit.
+   * server data dir and reads the commit field. If no install exists,
+   * the product.json lacks a commit, or its version doesn't match this
+   * client's release (stale install), falls back to the IDE's commit.
    */
   private async resolveServerCommit(containerId: string): Promise<string> {
     if (this.resolvedCommit) return this.resolvedCommit;
@@ -362,7 +363,22 @@ export class ServerManager implements IServerManager {
     if (result.exitCode === 0 && result.stdout.trim()) {
       try {
         const product = JSON.parse(result.stdout);
-        if (typeof product.commit === "string" && product.commit) {
+        const installedVersion =
+          typeof product.version === "string" ? product.version : "";
+        // A stale install built for a different client release gets refused by
+        // the client ("Client refused: version mismatch") after IDE updates on
+        // persistent (bind-mounted) install roots. Only adopt an install whose
+        // release matches this client; custom-REH builds share the version.
+        if (
+          this.productInfo.version &&
+          installedVersion !== this.productInfo.version
+        ) {
+          getLogger().info(
+            `[install] resolveServerCommit: stale install version=${installedVersion} != client ${this.productInfo.version}; using ide commit`,
+          );
+          // Fall through to the IDE-commit fallback below (do NOT adopt,
+          // do NOT cache the stale commit).
+        } else if (typeof product.commit === "string" && product.commit) {
           this.resolvedCommit = product.commit;
           getLogger().info(
             `[install] resolveServerCommit: commit=${product.commit}`,
@@ -396,8 +412,11 @@ export class ServerManager implements IServerManager {
     return this.resolvedArch;
   }
 
-  // No version comparison: if the binary is present, use it.
-  // When the IDE updates, the container will be rebuilt anyway.
+  // Version-gated adoption: a glob-found install is only used when its
+  // product.json version matches this client (see resolveServerCommit /
+  // probeContainer). On persistent (bind-mounted) install roots an IDE
+  // update leaves the old install behind; starting it gets refused by
+  // the client ("Client refused: version mismatch").
   async isServerBinaryPresent(containerId: string): Promise<boolean> {
     const installRoot = await this.getServerInstallRoot(containerId);
     const commit = await this.resolveServerCommit(containerId);
@@ -438,10 +457,21 @@ export class ServerManager implements IServerManager {
     const binaryName = this.productInfo.serverApplicationName;
     const marker = `ARTPROBE-${randomBytes(8).toString("hex")}`;
 
+    // Version gate: a glob-found install whose product.json version
+    // differs from this client's release is stale (e.g. IDE updated while
+    // the install root is bind-mounted) — fall back to the IDE commit so
+    // the matching server gets installed. Skipped when the client version
+    // is unknown (non-VSCodium adapter fallback).
+    const versionGate = this.productInfo.version
+      ? `v='${this.productInfo.version}'; ` +
+        `if [ -n "$v" ] && ! grep -q "\\"version\\": \\"$v\\"" "${serverDataDir}/bin/$c/product.json" 2>/dev/null; then c="${this.productInfo.commit}"; fi; `
+      : "";
+
     const cmd =
       `a=$(uname -m); ` +
       `c=$(for f in ${glob}; do [ -f "$f" ] && { sed -n 's/.*"commit": "\\([0-9a-f]*\\)".*/\\1/p' "$f"; break; }; done); ` +
       `[ -n "$c" ] || c="${this.productInfo.commit}"; ` +
+      versionGate +
       `p=no; [ -f "${serverDataDir}/bin/$c/bin/${binaryName}" ] && p=yes; ` +
       `printf '%s\\n' '${marker}'; ` +
       `printf '%s\\n' "$a" "$c" "$p" "$PATH"`;
