@@ -35,7 +35,10 @@ import {
 } from "../devcontainer/api";
 import { resolveConfigVars } from "../devcontainer/readResolvedConfig";
 import { URI } from "vscode-uri";
-import { buildIdentityLabels } from "../workflows/postLaunch";
+import {
+  buildIdentityLabels,
+  buildLookupLabels,
+} from "../workflows/postLaunch";
 import { getPlatformAdapter } from "../platform";
 
 /** File-based logger that works regardless of window state. */
@@ -512,12 +515,14 @@ export class RemoteAuthorityResolver {
     try {
       const adapter = await getPlatformAdapter();
       const platformTarget = adapter.name.toLowerCase();
-      const idLabels = await buildIdentityLabels({
+      const labelParams = {
         platformTarget,
         workspaceFolder,
         configPath,
         config: undefined,
-      });
+      };
+      const lookupLabels = await buildLookupLabels(labelParams);
+      const idLabels = await buildIdentityLabels(labelParams);
 
       const options = withDefaults({
         ...dotfilesFromConfig(vscode.workspace.getConfiguration()),
@@ -534,7 +539,7 @@ export class RemoteAuthorityResolver {
         options,
         configPath,
         undefined,
-        idLabels,
+        lookupLabels,
       );
       logToFile(`[Resolver] Lifecycle hooks complete`);
       // Finish any background tasks the CLI started (e.g. non-blocking hooks).

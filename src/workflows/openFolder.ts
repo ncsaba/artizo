@@ -17,6 +17,7 @@ import { getPlatformAdapter } from "../platform";
 import {
   connectToContainer,
   buildIdentityLabels,
+  buildLookupLabels,
   finishBackgroundTasks,
   buildAuthorityAndOpen,
   throwIfCancelled,
@@ -111,12 +112,14 @@ export async function openFolderInContainer(
         progress.report({ message: "Building container..." });
 
         const platformTarget = (await getPlatformAdapter()).name.toLowerCase();
-        const idLabels = await buildIdentityLabels({
+        const labelParams = {
           platformTarget,
           workspaceFolder: folder,
           configPath: configFile,
           config: configResult.config as Record<string, unknown> | undefined,
-        });
+        };
+        const lookupLabels = await buildLookupLabels(labelParams);
+        const idLabels = await buildIdentityLabels(labelParams);
         const options = withDefaults({
           ...dotfilesFromConfig(vscode.workspace.getConfiguration()),
           workspaceFolder: folder,
@@ -129,7 +132,7 @@ export async function openFolderInContainer(
           options,
           configResult.configPath,
           undefined,
-          idLabels,
+          lookupLabels,
         );
         throwIfCancelled(token);
       },

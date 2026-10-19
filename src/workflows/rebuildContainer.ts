@@ -14,6 +14,7 @@ import {
   connectToContainer,
   writeOverrideConfig,
   buildIdentityLabels,
+  buildLookupLabels,
   finishBackgroundTasks,
   buildAuthorityAndOpen,
   throwIfCancelled,
@@ -87,12 +88,14 @@ export async function rebuildContainer(
         });
 
         const platformTarget = (await getPlatformAdapter()).name.toLowerCase();
-        const idLabels = await buildIdentityLabels({
+        const labelParams = {
           platformTarget,
           workspaceFolder,
           configPath: configResult!.configPath,
           config: configResult!.config as Record<string, unknown> | undefined,
-        });
+        };
+        const lookupLabels = await buildLookupLabels(labelParams);
+        const idLabels = await buildIdentityLabels(labelParams);
         const options = withDefaults({
           workspaceFolder,
           configFile: configResult!.configPath
@@ -109,7 +112,7 @@ export async function rebuildContainer(
           options,
           configResult!.configPath,
           undefined,
-          idLabels,
+          lookupLabels,
         );
         throwIfCancelled(token);
       },
@@ -170,14 +173,20 @@ export async function rebuildContainer(
             const relaunchPlatformTarget = (
               await getPlatformAdapter()
             ).name.toLowerCase();
-            const relaunchIdLabels = await buildIdentityLabels({
+            const relaunchLabelParams = {
               platformTarget: relaunchPlatformTarget,
               workspaceFolder,
               configPath: configResult!.configPath,
               config: configResult!.config as
                 | Record<string, unknown>
                 | undefined,
-            });
+            };
+            const relaunchLookupLabels = await buildLookupLabels(
+              relaunchLabelParams,
+            );
+            const relaunchIdLabels = await buildIdentityLabels(
+              relaunchLabelParams,
+            );
             const upOptions = withDefaults({
               workspaceFolder,
               removeExistingContainer: true,
@@ -193,7 +202,7 @@ export async function rebuildContainer(
               upOptions,
               configResult!.configPath,
               "Container start failed",
-              relaunchIdLabels,
+              relaunchLookupLabels,
             );
             throwIfCancelled(token);
           },

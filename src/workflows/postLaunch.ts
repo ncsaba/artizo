@@ -170,24 +170,19 @@ export async function writeOverrideConfig(
 }
 
 /**
- * Docker labels that bind a container to a workspace folder (and config file).
- * Shared by the folder-based workflows (reopen, rebuild, open-folder) for both
- * the build filter and lookup. Clone-in-volume uses a different label set.
- *
- * When config + configPath are provided, also computes config file hashes
- * (devcontainer.json + referenced Dockerfile/compose files) and emits the
- * artizo.config_hash label so reconnects can detect config drift. Hashing
- * failures are logged and skipped - a missing hash label prompts the user
- * to rebuild, which is the safe fallback.
+ * Stable labels that bind a container to a workspace folder (and config file).
+ * These are the ONLY labels safe for find-existing lookups: the CLI matches
+ * containers with label-AND semantics over this set, so every label here must
+ * be reproducible across rebuilds. Volatile values (config hashes, timestamps)
+ * must never be added here.
  */
-export async function buildIdentityLabels(params: {
+export async function buildLookupLabels(params: {
   platformTarget: string;
   workspaceFolder: string;
   configPath?: string | null;
-  config?: Record<string, unknown>;
 }): Promise<string[]> {
-  const { platformTarget, workspaceFolder, configPath, config } = params;
-  const labels = [
+  const { platformTarget, workspaceFolder, configPath } = params;
+  return [
     `artizo.target=${platformTarget}`,
     `artizo.local_folder=${workspaceFolder}`,
     `devcontainer.local_folder=${workspaceFolder}`,
@@ -198,6 +193,26 @@ export async function buildIdentityLabels(params: {
         ]
       : []),
   ];
+}
+
+/**
+ * Full annotation label set written onto a freshly built container: the
+ * stable lookup labels from buildLookupLabels, plus (when config + configPath
+ * are provided) the artizo.config_hash label so reconnects can detect config
+ * drift, plus artizo.remote_user so the resolver can recover it. The
+ * config_hash value differs every build (it embeds a writtenAt timestamp), so
+ * it travels as an annotation only and must stay out of buildLookupLabels.
+ * Hashing failures are logged and skipped - a missing hash label prompts the
+ * user to rebuild, which is the safe fallback.
+ */
+export async function buildIdentityLabels(params: {
+  platformTarget: string;
+  workspaceFolder: string;
+  configPath?: string | null;
+  config?: Record<string, unknown>;
+}): Promise<string[]> {
+  const { configPath, config } = params;
+  const labels = [...(await buildLookupLabels(params))];
 
   // Preserve remoteUser as a label so the resolver can recover it on
   // re-attach without re-reading devcontainer.json (which may be gone).

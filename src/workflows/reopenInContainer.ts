@@ -16,6 +16,7 @@ import {
   connectToContainer,
   writeOverrideConfig,
   buildIdentityLabels,
+  buildLookupLabels,
   finishBackgroundTasks,
   buildAuthorityAndOpen,
   throwIfCancelled,
@@ -164,12 +165,14 @@ export async function reopenInContainer(
         // moved, or container created by another tool), fall back to
         // manual `docker start` — hooks won't run, but the container is
         // reused rather than orphaned.
-        const idLabels = await buildIdentityLabels({
+        const labelParams = {
           platformTarget,
           workspaceFolder,
           configPath: configResult.configPath,
           config: configResult.config as Record<string, unknown> | undefined,
-        });
+        };
+        const lookupLabels = await buildLookupLabels(labelParams);
+        const idLabels = await buildIdentityLabels(labelParams);
         const reconnectOptions = withDefaults({
           workspaceFolder,
           additionalLabels: idLabels,
@@ -185,7 +188,7 @@ export async function reopenInContainer(
             reconnectOptions,
             configResult.configPath,
             undefined,
-            idLabels,
+            lookupLabels,
           );
           await finishBackgroundTasks(result);
           if (!result?.containerId) {
@@ -261,12 +264,14 @@ export async function reopenInContainer(
           }
 
           progress.report({ message: "Building container..." });
-          const idLabels = await buildIdentityLabels({
+          const labelParams = {
             platformTarget,
             workspaceFolder,
             configPath: configResult.configPath,
             config: configResult.config as Record<string, unknown> | undefined,
-          });
+          };
+          const lookupLabels = await buildLookupLabels(labelParams);
+          const idLabels = await buildIdentityLabels(labelParams);
           const options = withDefaults({
             workspaceFolder,
             additionalLabels: idLabels,
@@ -283,7 +288,7 @@ export async function reopenInContainer(
             options,
             configResult.configPath,
             undefined,
-            idLabels,
+            lookupLabels,
           );
 
           await finishBackgroundTasks(result);
