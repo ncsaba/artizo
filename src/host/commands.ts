@@ -27,6 +27,12 @@ import type { ConfigManager } from "../config/configManager";
 import type { ContainerLifecycle } from "../lifecycle/containerLifecycle";
 import { reopenInContainer } from "../workflows/reopenInContainer";
 import { rebuildContainer } from "../workflows/rebuildContainer";
+import {
+  writeRebuildMarker,
+  readFreshRebuildMarker,
+  clearRebuildMarker,
+  type RebuildMarkerPayload,
+} from "../workflows/rebuildRequest";
 import { openFolderInContainer } from "../workflows/openFolder";
 import { cloneInVolume } from "../workflows/cloneInVolume";
 import { attachToContainer } from "../workflows/attachToContainer";
@@ -297,6 +303,79 @@ export async function openFolderInContainerNewWindowHandler(
   });
 }
 
+/**
+ * Relay a rebuild request from a managed (container-side) window to the
+ * host: write the request marker into the workspace (the bind mount makes
+ * it visible in the host folder at the same relative path), then trigger
+ * the existing reopen-in-host flow. The host window that opens picks the
+ * marker up during activation (see processPendingRebuildRequest).
+ */
+async function relayRebuildToHost(noCache: boolean): Promise<void> {
+  const logger = getLogger();
+  const workspaceUri = vscode.workspace.workspaceFolders?.[0]?.uri;
+  if (!workspaceUri) {
+    vscode.window.showErrorMessage("No workspace folder open.");
+    return;
+  }
+  logger.info(
+    `${BRAND_PREFIX} Relaying rebuild request to host (noCache=${noCache})`,
+  );
+  await writeRebuildMarker(workspaceUri, { noCache });
+  vscode.commands.executeCommand("artizo.reopenInHost");
+}
+
+/**
+ * Host-side pickup for the rebuild relay: if a container window left a
+ * fresh rebuild request marker in the workspace, clear it FIRST (loop
+ * safety) and run the same rebuild+reconnect path as the "Rebuild and
+ * Reopen" menu item. Never rethrows — failures are logged and surfaced
+ * so activation can continue.
+ */
+export async function processPendingRebuildRequest(
+  ctx: CommandContext,
+): Promise<void> {
+  const logger = getLogger();
+  const workspaceUri = vscode.workspace.workspaceFolders?.[0]?.uri;
+  if (!workspaceUri) return; // no workspace folder open → skip
+
+  const request: RebuildMarkerPayload | null =
+    await readFreshRebuildMarker(workspaceUri);
+  if (!request) return;
+
+  // Clear before rebuilding: if this window is itself reopened mid-run we
+  // must not pick the same request up again.
+  await clearRebuildMarker(workspaceUri);
+
+  try {
+    logger.info(
+      `${BRAND_PREFIX} Pending rebuild request found — rebuilding (noCache=${request.noCache})`,
+    );
+    ctx.buildLogTerminal.show(true);
+    ctx.buildLogPty.writeLine(
+      `${BRAND_PREFIX} Rebuild and Reopen starting...`,
+    );
+    guardHostContext();
+    await checkDockerAvailable(ctx.dockerPath);
+    guardHostContext();
+    ctx.buildLogPty.writeLine(
+      `${BRAND_PREFIX} Workspace: ${workspaceUri.fsPath}`,
+    );
+    await rebuildContainer(ctx.deps, ctx.ui, {
+      workspaceFolder: workspaceUri.fsPath,
+      workspaceUri,
+      noCache: request.noCache,
+      reconnect: true,
+    });
+    logger.info(`${BRAND_PREFIX} Rebuild and Reopen completed`);
+  } catch (err: unknown) {
+    const error = wrapError(err);
+    logger.error("Relayed rebuild failed", error);
+    await vscode.window.showErrorMessage(
+      `${BRAND_PREFIX} Relayed rebuild failed: ${error.message}`,
+    );
+  }
+}
+
 export async function rebuildContainerMenuHandler(
   ctx: CommandContext,
 ): Promise<void> {
@@ -311,13 +390,7 @@ export async function rebuildContainerMenuHandler(
   }
 
   if (isManaged) {
-    const action = await vscode.window.showErrorMessage(
-      `${BRAND_PREFIX} Rebuild must be run from a host window. You are currently connected to a managed container.`,
-      "Reopen in Host",
-    );
-    if (action === "Reopen in Host") {
-      vscode.commands.executeCommand("artizo.reopenInHost");
-    }
+    await relayRebuildToHost(false);
     return;
   }
 
@@ -375,13 +448,7 @@ export async function rebuildContainerHandler(
     ctx.buildLogPty.writeLine(`${BRAND_PREFIX} Rebuild Container starting...`);
 
     if (isManaged) {
-      const action = await vscode.window.showErrorMessage(
-        `${BRAND_PREFIX} Rebuild must be run from a host window. You are currently connected to a managed container.`,
-        "Reopen in Host",
-      );
-      if (action === "Reopen in Host") {
-        vscode.commands.executeCommand("artizo.reopenInHost");
-      }
+      await relayRebuildToHost(false);
       return;
     }
 
@@ -423,13 +490,7 @@ export async function rebuildContainerNoCacheHandler(
     );
 
     if (isManaged) {
-      const action = await vscode.window.showErrorMessage(
-        `${BRAND_PREFIX} Rebuild must be run from a host window. You are currently connected to a managed container.`,
-        "Reopen in Host",
-      );
-      if (action === "Reopen in Host") {
-        vscode.commands.executeCommand("artizo.reopenInHost");
-      }
+      await relayRebuildToHost(true);
       return;
     }
 

@@ -49,6 +49,11 @@ vi.mock("../../src/workflows/cloneInVolume", () => ({
 vi.mock("../../src/workflows/attachToContainer", () => ({
   attachToContainer: vi.fn(),
 }));
+vi.mock("../../src/workflows/rebuildRequest", () => ({
+  writeRebuildMarker: vi.fn().mockResolvedValue(undefined),
+  readFreshRebuildMarker: vi.fn().mockResolvedValue(null),
+  clearRebuildMarker: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock("../../src/host/adapters", () => ({
   buildOpenFolderUI: vi.fn().mockReturnValue({ pickFolder: vi.fn() }),
   buildCloneInVolumeUI: vi.fn().mockReturnValue({ promptRepoUrl: vi.fn() }),
@@ -97,6 +102,7 @@ vi.mock("../../src/host/guards", () => ({
 import * as vscode from "vscode";
 import { reopenInContainer } from "../../src/workflows/reopenInContainer";
 import { rebuildContainer } from "../../src/workflows/rebuildContainer";
+import { writeRebuildMarker } from "../../src/workflows/rebuildRequest";
 import { cloneInVolume } from "../../src/workflows/cloneInVolume";
 import { attachToContainer } from "../../src/workflows/attachToContainer";
 import { openFolderInContainer } from "../../src/workflows/openFolder";
@@ -390,18 +396,18 @@ describe("command handlers", () => {
       );
     });
 
-    it("exits when running inside a container", async () => {
+    it("relays the rebuild to the host when running inside a container", async () => {
       const ctx = mockCtx();
       (vscode.env as any).remoteName = "artizo-container";
-      vi.mocked(vscode.window.showErrorMessage).mockResolvedValue(
-        undefined as any,
-      );
 
       await rebuildContainerHandler(ctx);
 
-      expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
-        expect.stringContaining("Rebuild must be run from a host window"),
-        "Reopen in Host",
+      expect(writeRebuildMarker).toHaveBeenCalledWith(
+        { fsPath: "/test/workspace" },
+        { noCache: false },
+      );
+      expect(vscode.commands.executeCommand).toHaveBeenCalledWith(
+        "artizo.reopenInHost",
       );
     });
 
@@ -638,31 +644,39 @@ describe("command handlers", () => {
       );
     });
 
-    it("opens 'Reopen in Host' when running inside a container", async () => {
+    it("writes the relay marker and reopens in host when inside a container", async () => {
       const ctx = mockCtx();
       (vscode.env as any).remoteName = "artizo-container";
-      vi.mocked(vscode.window.showErrorMessage).mockResolvedValue(
-        "Reopen in Host" as any,
-      );
 
       await rebuildContainerMenuHandler(ctx);
 
+      expect(writeRebuildMarker).toHaveBeenCalledWith(
+        { fsPath: "/test/workspace" },
+        { noCache: false },
+      );
       expect(vscode.commands.executeCommand).toHaveBeenCalledWith(
         "artizo.reopenInHost",
       );
     });
 
-    it("does not execute reopenInHost when action not chosen", async () => {
+    it("does not relay when no workspace folder is open", async () => {
       const ctx = mockCtx();
       (vscode.env as any).remoteName = "artizo-container";
-      vi.mocked(vscode.window.showErrorMessage).mockResolvedValue(
-        undefined as any,
-      );
+      const originalFolders = (vscode.workspace as any).workspaceFolders;
+      (vscode.workspace as any).workspaceFolders = [];
 
-      await rebuildContainerMenuHandler(ctx);
+      try {
+        await rebuildContainerMenuHandler(ctx);
+      } finally {
+        (vscode.workspace as any).workspaceFolders = originalFolders;
+      }
 
+      expect(writeRebuildMarker).not.toHaveBeenCalled();
       expect(vscode.commands.executeCommand).not.toHaveBeenCalledWith(
         "artizo.reopenInHost",
+      );
+      expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
+        "No workspace folder open.",
       );
     });
 
@@ -778,18 +792,18 @@ describe("command handlers", () => {
       );
     });
 
-    it("exits when running inside a managed container", async () => {
+    it("relays the no-cache rebuild to the host when inside a managed container", async () => {
       const ctx = mockCtx();
       (vscode.env as any).remoteName = "artizo-container";
-      vi.mocked(vscode.window.showErrorMessage).mockResolvedValue(
-        undefined as any,
-      );
 
       await rebuildContainerNoCacheHandler(ctx);
 
-      expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
-        expect.stringContaining("Rebuild must be run from a host window"),
-        "Reopen in Host",
+      expect(writeRebuildMarker).toHaveBeenCalledWith(
+        { fsPath: "/test/workspace" },
+        { noCache: true },
+      );
+      expect(vscode.commands.executeCommand).toHaveBeenCalledWith(
+        "artizo.reopenInHost",
       );
     });
 

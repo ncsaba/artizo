@@ -24,7 +24,11 @@ import {
   createBuildLogTerminal,
   autoDetectDevcontainer,
 } from "./host/services";
-import { registerCoreCommands, type CommandContext } from "./host/commands";
+import {
+  registerCoreCommands,
+  processPendingRebuildRequest,
+  type CommandContext,
+} from "./host/commands";
 import { bootstrapRemoteSideLoad } from "./remote/sideload";
 import { clearAllCached, initCache, disposeCache } from "./ssh/askpassCache";
 import { initVscodiumFeed } from "./remote/vscodiumFeed";
@@ -37,6 +41,7 @@ import {
   initTier,
   isDevContainerTier,
   isAttachedContainerWindow,
+  isInDevContainerWindow,
   ExecutionTier,
   canDriveDocker,
   type DetectedTier,
@@ -397,6 +402,21 @@ async function activateInternal(
 
   // 10. Auto-detect devcontainer.json
   autoDetectDevcontainer(context, services.configManager);
+
+  // 11. Rebuild-from-inside relay pickup (host windows only): a container
+  // window may have left a rebuild request marker in the workspace before
+  // reopening in host. Marker presence IS the trigger — any host window
+  // opening the folder picks it up. Never rethrows: activation must not
+  // fail because of a pending rebuild.
+  if (!isInDevContainerWindow()) {
+    processPendingRebuildRequest(cmdCtx).catch((err: unknown) => {
+      getLogger().error(
+        `[rebuildRequest] relay pickup failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
+  }
 
   getLogger().info(`${BRAND} activated.`);
 }
