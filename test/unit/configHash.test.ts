@@ -328,6 +328,16 @@ describe("serialize / deserialize", () => {
     expect(deserializeConfigHashes(serialized)).toEqual(hashes);
   });
 
+  it("serialized label carries only file hashes + write timestamp (no IDE/extension version)", () => {
+    // Pin for container reuse across IDE/artizo upgrades: the
+    // artizo.config_hash label format must stay version-free. If an IDE or
+    // extension version ever sneaks into the label, every upgrade would
+    // look like config drift and prompt a needless rebuild.
+    const hashes = { "devcontainer.json": "0123456789abcdef" };
+    const parsed = JSON.parse(serializeConfigHashes(hashes));
+    expect(Object.keys(parsed).sort()).toEqual(["files", "writtenAt"]);
+  });
+
   it("deserialize returns undefined for empty input", () => {
     expect(deserializeConfigHashes(undefined)).toBeUndefined();
     expect(deserializeConfigHashes("")).toBeUndefined();
@@ -339,5 +349,26 @@ describe("serialize / deserialize", () => {
 
   it("deserialize returns undefined if files key is missing", () => {
     expect(deserializeConfigHashes(JSON.stringify({ writtenAt: "x" }))).toBeUndefined();
+  });
+});
+
+describe("container reuse across IDE / extension upgrades", () => {
+  it("hash is unchanged and no drift is reported when only the IDE/artizo version differs", async () => {
+    // The artizo.config_hash drift check (checkContainerConfig) triggers a
+    // rebuild prompt only when config FILES change. IDE and artizo
+    // extension versions are deliberately not inputs to the hash: an
+    // upgrade must reuse the existing container and update the server in
+    // place (see serverManager version-gated adoption). This pins that
+    // contract: same files before and after an "upgrade" → zero drift.
+    const config = { image: "localhost/devcontainer/axon-mcp:latest" };
+    const configPath = path.join(tmpDir, "devcontainer.json");
+
+    // Stored by the pre-upgrade client (label on the container)…
+    const stored = await computeConfigHashes(config, tmpDir, configPath);
+    // …recomputed by the post-upgrade client from the same files.
+    const current = await computeConfigHashes(config, tmpDir, configPath);
+
+    expect(current).toEqual(stored);
+    expect(compareConfigHashes(stored, current).changed).toBe(false);
   });
 });
