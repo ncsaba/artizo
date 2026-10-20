@@ -480,6 +480,68 @@ describe("serverManager", () => {
         expect(probeCmd).not.toContain(`v=''`);
         expect(probeCmd).not.toContain("grep -q");
       });
+
+      it("IDE upgrade: matching server installs in place next to the stale one, then cleanup removes it — no container rebuild", async () => {
+        // Pins container reuse when ONLY the IDE/artizo version changes.
+        // The probe simulates the post-gate outcome on an IDE upgrade: the
+        // stale install's version no longer matches, so the gate flips to
+        // the IDE commit and reports the binary absent. The fix is a new
+        // bin/<ide-commit>/ SIBLING install via docker exec into the SAME
+        // container — ServerManager has no container create/remove/build
+        // capability, so an in-place server update cannot rebuild anything.
+        const staleCommit = "000dead000000";
+        setupExecFileResponses([
+          // probeContainer: version gate flipped to IDE commit, absent
+          { probeFields: ["x86_64", TEST_PRODUCT_INFO.commit, "no", "/usr/bin:/bin"] },
+          // installServer: finalize (patch+move) → creates bin/<ide-commit>
+          { stdout: "" },
+          // start: ensureConnectionToken
+          { stdout: "my-token\n" },
+          // start: probeRunningServer
+          { stdout: "NONE\n" },
+          // start: stop
+          { stdout: "" },
+          // start: userEnvProbe
+          { userEnvProbe: true },
+          // start: nohup start command
+          { stdout: "" },
+          // start: waitForPort
+          { stdout: "Extension host agent listening on 9100\n" },
+          // cleanup: reaps the stale sibling the gate refused
+          { stdout: `removed:${staleCommit}\n` },
+        ]);
+
+        const versioned = createVersionedManager(CLIENT_VERSION);
+        await versioned.ensureInstalled("container1");
+        const info = await versioned.start("container1");
+
+        expect(info.port).toBe(9100);
+        expect(info.installPath).toBe(
+          `/tmp/${TEST_PRODUCT_INFO.serverDataFolderName}/bin/${TEST_PRODUCT_INFO.commit}`,
+        );
+
+        // The finalize step created the new version dir as a sibling of the
+        // stale install (shared bin/ parent) without touching the stale one.
+        const finalDir = `/tmp/${TEST_PRODUCT_INFO.serverDataFolderName}/bin/${TEST_PRODUCT_INFO.commit}`;
+        const finalizeCmd = mockHost.dockerExec.mock.calls[1][1].join(" ");
+        expect(finalizeCmd).toContain(`rm -rf "${finalDir}"`);
+        expect(finalizeCmd).toContain(`mv "`);
+        expect(finalizeCmd).toContain(`"${finalDir}"`);
+        expect(finalizeCmd).not.toContain(`bin/${staleCommit}`);
+
+        // Cleanup then removed the stale sibling, keeping the active dir.
+        const cleanupCmd = mockHost.dockerExec.mock.calls[8][1].join(" ");
+        expect(cleanupCmd).toContain(`[ "$d" = "${TEST_PRODUCT_INFO.commit}" ] && continue`);
+        expect(cleanupCmd).toContain("rm -rf --");
+
+        // Every docker interaction is an exec against the same container:
+        // 1 probe + 1 finalize + 6 start + 1 cleanup. No build/run/rm of
+        // the container is even expressible through this code path.
+        expect(mockHost.dockerExec).toHaveBeenCalledTimes(9);
+        for (const call of mockHost.dockerExec.mock.calls) {
+          expect(call[0]).toBe("container1");
+        }
+      });
     });
 
     describe("ensureInstalled", () => {
@@ -1179,6 +1241,144 @@ describe("serverManager", () => {
         const shCmdIndex = args.indexOf("-c");
         const shellCmd = args[shCmdIndex + 1];
         expect(shellCmd).toContain("--telemetry-level error");
+      });
+    });
+
+    describe("old install cleanup", () => {
+      /**
+       * Full fresh-install flow: probe (binary absent) → installServer
+       * (finalize mv) → start (token, probe, stop, envProbe, nohup,
+       * waitForPort) → cleanup of superseded sibling install dirs.
+       */
+      function freshInstallAndStartResponses(
+        cleanup: { stdout?: string; stderr?: string; exitCode?: number } = {},
+      ): Array<{
+        stdout?: string;
+        stderr?: string;
+        exitCode?: number;
+        probeFields?: [string, string, string, string];
+        userEnvProbe?: boolean;
+      }> {
+        return [
+          // probeContainer: arch, commit, not-present, PATH
+          { probeFields: ["x86_64", TEST_PRODUCT_INFO.commit, "no", "/usr/bin:/bin"] },
+          // installServer: finalize (patch+move)
+          { stdout: "" },
+          // start: ensureConnectionToken
+          { stdout: "my-token\n" },
+          // start: probeRunningServer — no pidFile in the fresh dir
+          { stdout: "NONE\n" },
+          // start: stop (no-op sh -c)
+          { stdout: "" },
+          // start: userEnvProbe
+          { userEnvProbe: true },
+          // start: nohup start command
+          { stdout: "" },
+          // start: waitForPort
+          { stdout: "Extension host agent listening on 54321\n" },
+          // cleanup
+          cleanup,
+        ];
+      }
+
+      it("deletes superseded sibling installs after a fresh install + successful start", async () => {
+        setupExecFileResponses(
+          freshInstallAndStartResponses({ stdout: "removed:000dead000000\n" }),
+        );
+
+        const info = await manager.ensureInstalled("container1");
+        expect(info.commit).toBe(TEST_PRODUCT_INFO.commit);
+
+        const started = await manager.start("container1");
+        expect(started.port).toBe(54321);
+
+        // The cleanup script is the 9th exec (index 8).
+        const cleanupCall = mockHost.dockerExec.mock.calls[8];
+        expect(cleanupCall[0]).toBe("container1");
+        const cmd = cleanupCall[1] as string[];
+        expect(cmd[0]).toBe("sh");
+        expect(cmd[1]).toBe("-c");
+        const script = cmd[2];
+        // Scoped to the bin/ dir of the shared server root…
+        expect(script).toContain(
+          `/tmp/${TEST_PRODUCT_INFO.serverDataFolderName}/bin`,
+        );
+        // …never deletes the active install…
+        expect(script).toContain(`[ "$d" = "${TEST_PRODUCT_INFO.commit}" ] && continue`);
+        // …only dirs that look like server installs…
+        expect(script).toContain(`[ -f "./$d/product.json" ] || continue`);
+        // …and the delete itself.
+        expect(script).toContain(`rm -rf -- "./$d"`);
+      });
+
+      it("does not clean up when no fresh install happened (already-installed path)", async () => {
+        setupExecFileResponses([
+          // probeContainer: binary already present
+          { probeFields: ["x86_64", TEST_PRODUCT_INFO.commit, "yes", "/usr/bin:/bin"] },
+          // start: ensureConnectionToken
+          { stdout: "my-token\n" },
+          // start: probeRunningServer
+          { stdout: "NONE\n" },
+          // start: stop
+          { stdout: "" },
+          // start: userEnvProbe
+          { userEnvProbe: true },
+          // start: nohup start command
+          { stdout: "" },
+          // start: waitForPort
+          { stdout: "Extension host agent listening on 54321\n" },
+        ]);
+
+        await manager.ensureInstalled("container1");
+        await manager.start("container1");
+
+        for (const call of mockHost.dockerExec.mock.calls) {
+          expect((call[1] as string[]).join(" ")).not.toContain("rm -rf --");
+        }
+      });
+
+      it("does not clean up when the freshly installed server fails to start", async () => {
+        setupExecFileResponses([
+          { probeFields: ["x86_64", TEST_PRODUCT_INFO.commit, "no", "/usr/bin:/bin"] },
+          // installServer: finalize
+          { stdout: "" },
+          // start: ensureConnectionToken
+          { stdout: "my-token\n" },
+          // start: probeRunningServer
+          { stdout: "NONE\n" },
+          // start: stop
+          { stdout: "" },
+          // start: userEnvProbe
+          { userEnvProbe: true },
+          // start: nohup start fails
+          { stdout: "", stderr: "No such file or directory", exitCode: 127 },
+        ]);
+
+        await manager.ensureInstalled("container1");
+        await expect(manager.start("container1")).rejects.toThrow(
+          "Failed to start server",
+        );
+
+        // Old installs survive a failed start: the replacement server was
+        // never confirmed running.
+        for (const call of mockHost.dockerExec.mock.calls) {
+          expect((call[1] as string[]).join(" ")).not.toContain("rm -rf --");
+        }
+      });
+
+      it("cleanup failure is logged and never breaks the connect", async () => {
+        setupExecFileResponses(
+          freshInstallAndStartResponses({
+            stdout: "",
+            stderr: "Device or resource busy",
+            exitCode: 1,
+          }),
+        );
+
+        await manager.ensureInstalled("container1");
+        const info = await manager.start("container1");
+
+        expect(info.port).toBe(54321);
       });
     });
   });

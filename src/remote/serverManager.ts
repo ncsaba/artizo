@@ -235,6 +235,15 @@ export class ServerManager implements IServerManager {
   private resolvedCommit: string | undefined;
   /** Cached container arch. Avoids re-running `uname -m` on every start. */
   private resolvedArch: string | undefined;
+
+  /**
+   * Commit of an install completed by THIS manager that has not yet been
+   * confirmed running. Set by installServer(), consumed by
+   * maybeCleanupOldInstalls() once start() announces a listening port —
+   * superseded sibling installs are only reaped after the replacement
+   * server is verifiably up.
+   */
+  private freshInstalledCommit: string | undefined;
   /**
    * Cached remoteUser preflight result per container: { user, exists, shell }.
    * `shell` is parsed from `getent passwd` field 7 — no extra round-trip.
@@ -761,6 +770,7 @@ export class ServerManager implements IServerManager {
     // Use the IDE commit for the install dir, matching the official
     // extension convention and zygos.
     this.resolvedCommit = this.productInfo.commit;
+    this.freshInstalledCommit = this.productInfo.commit;
     getLogger().info(`[install] done: ${finalDir}`);
   }
 
@@ -947,6 +957,12 @@ export class ServerManager implements IServerManager {
       );
     }
 
+    // The fresh install (if any) is now verifiably running — reap
+    // superseded sibling installs left behind by older IDE versions.
+    // Failures are logged, never fatal: a stale dir is disk bloat, not a
+    // connect error.
+    await this.maybeCleanupOldInstalls(containerId, commit, resolvedUser);
+
     return {
       commit,
       arch,
@@ -1041,6 +1057,81 @@ export class ServerManager implements IServerManager {
     }
 
     return 0;
+  }
+
+  /**
+   * Remove superseded server install dirs after a fresh install + start.
+   *
+   * On persistent (bind-mounted) server roots an IDE update leaves the old
+   * version dir behind (nothing pruned it — see the known-limitation notes
+   * on versioned install paths). The version gate refuses to adopt such an
+   * install ("Client refused: version mismatch") and no rollback path
+   * exists after a VS-Codium upgrade, so it is pure dead weight (hundreds
+   * of MB per release). Runs only when THIS manager just installed a new
+   * version dir AND the server started from it announced a listening port —
+   * never before the replacement is confirmed up (owner decision: no grace
+   * period; old folders are never useful).
+   *
+   * Deletes only sibling dirs under the same bin/ parent that contain a
+   * product.json (the install marker); the active install is always kept.
+   * Staging dirs (.staging-*) live in the server data dir, not bin/, and
+   * shell globs skip dotfiles, so a concurrent install mid-flight is never
+   * touched. All failures are logged and swallowed — cleanup must never
+   * break a connect.
+   */
+  private async maybeCleanupOldInstalls(
+    containerId: string,
+    activeCommit: string,
+    user?: string,
+  ): Promise<void> {
+    const installedCommit = this.freshInstalledCommit;
+    if (!installedCommit) {
+      return;
+    }
+    this.freshInstalledCommit = undefined;
+    if (installedCommit !== activeCommit) {
+      getLogger().warn(
+        `[install] cleanup skipped: active commit ${activeCommit} != installed ${installedCommit}`,
+      );
+      return;
+    }
+
+    const installRoot = await this.getServerInstallRoot(containerId);
+    const binDir = pathPosix.join(this.getServerDataDir(installRoot), "bin");
+    getLogger().info(
+      `[install] cleaning up superseded server installs under ${binDir} (keeping ${activeCommit})`,
+    );
+
+    const script =
+      `cd "${binDir}" 2>/dev/null || exit 0; ` +
+      `for d in */; do ` +
+      `d="\${d%/}"; ` +
+      `[ "$d" = "${activeCommit}" ] && continue; ` +
+      `[ -f "./$d/product.json" ] || continue; ` +
+      `rm -rf -- "./$d" && echo "removed:$d"; ` +
+      `done; ` +
+      `exit 0`;
+
+    try {
+      const result = await this.host.dockerExec(
+        containerId,
+        ["sh", "-c", script],
+        user ? { user } : undefined,
+      );
+      if (result.exitCode !== 0) {
+        getLogger().warn(
+          `[install] old-install cleanup failed (exit ${result.exitCode}): ${result.stderr || result.stdout}`,
+        );
+      } else if (result.stdout.trim()) {
+        getLogger().info(
+          `[install] old-install cleanup: ${result.stdout.trim().split("\n").join(", ")}`,
+        );
+      }
+    } catch (err) {
+      getLogger().warn(
+        `[install] old-install cleanup error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   async stop(containerId: string): Promise<void> {
